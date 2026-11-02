@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Permite compartilhar qualquer arquivo do armazenamento com outros apps -->
+    <root-path name="root" path="." />
+</paths>
