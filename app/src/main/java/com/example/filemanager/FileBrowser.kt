@@ -145,8 +145,30 @@ private fun BrowserContent(
     val title = if (canGoUp) current.name else "Armazenamento interno"
     val inSearch = searching && query.isNotBlank()
 
-    val folderEntries = remember(currentPath, showHidden, sortName, ascending, refreshKey, refreshSignal) {
-        FileOps.sort(FileOps.list(File(currentPath), showHidden), sortKey, ascending)
+    val rawEntries = remember(currentPath, showHidden, refreshKey, refreshSignal) {
+        FileOps.list(File(currentPath), showHidden)
+    }
+
+    // Tamanho das pastas (só calculado ao ordenar por tamanho; chega pasta por pasta)
+    var folderSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var sizing by remember { mutableStateOf(false) }
+    LaunchedEffect(rawEntries, sortName, refreshKey, refreshSignal) {
+        if (sortName == SortKey.SIZE.name) {
+            sizing = true
+            folderSizes = emptyMap()
+            for (d in rawEntries.filter { it.isDirectory }) {
+                val bytes = withContext(Dispatchers.IO) { Scanner.measure(listOf(d)).bytes }
+                folderSizes = folderSizes + (d.absolutePath to bytes)
+            }
+            sizing = false
+        } else {
+            folderSizes = emptyMap()
+            sizing = false
+        }
+    }
+
+    val folderEntries = remember(rawEntries, sortName, ascending, folderSizes) {
+        FileOps.sort(rawEntries, sortKey, ascending, folderSizes)
     }
 
     var searchResults by remember { mutableStateOf<List<File>>(emptyList()) }
@@ -158,7 +180,7 @@ private fun BrowserContent(
             val found = withContext(Dispatchers.IO) {
                 FileOps.search(File(currentPath), query, showHidden)
             }
-            searchResults = FileOps.sort(found, sortKey, ascending)
+            searchResults = FileOps.sort(found, sortKey, ascending, folderSizes)
             searchRunning = false
         } else {
             searchResults = emptyList()
@@ -298,7 +320,7 @@ private fun BrowserContent(
                                                 ascending = !ascending
                                             } else {
                                                 sortName = key.name
-                                                ascending = true
+                                                ascending = key == SortKey.NAME
                                             }
                                         }
                                     )
@@ -429,7 +451,7 @@ private fun BrowserContent(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            if (busy || sizing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
             if (searching) {
                 OutlinedTextField(
@@ -493,6 +515,7 @@ private fun BrowserContent(
                             extra = if (inSearch) file.parent?.removePrefix(root.absolutePath) else null,
                             selectionMode = selected.isNotEmpty(),
                             isSelected = file.absolutePath in selected,
+                            folderSize = if (file.isDirectory) folderSizes[file.absolutePath] else null,
                             onClick = {
                                 when {
                                     selected.isNotEmpty() -> {
@@ -811,7 +834,8 @@ internal fun FileRow(
     selectionMode: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    folderSize: Long? = null
 ) {
     val context = LocalContext.current
     val modified = file.lastModified()
@@ -821,6 +845,9 @@ internal fun FileRow(
     val subtitle = buildString {
         if (!file.isDirectory) {
             append(Formatter.formatFileSize(context, file.length()))
+            append("  •  ")
+        } else if (folderSize != null) {
+            append(Formatter.formatFileSize(context, folderSize))
             append("  •  ")
         }
         append(date)

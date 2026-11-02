@@ -16,15 +16,26 @@ object FileOps {
             ?.filter { showHidden || !it.name.startsWith(".") }
             ?: emptyList()
 
-    /** Pastas primeiro; dentro de cada grupo, pelo critério escolhido. */
-    fun sort(list: List<File>, key: SortKey, ascending: Boolean): List<File> {
+    /**
+     * Pastas primeiro, depois pelo critério escolhido. Ao ordenar por tamanho, pastas e arquivos
+     * ficam misturados; o tamanho de cada pasta vem de [dirSizes] (caminho -> bytes), calculado à parte.
+     */
+    fun sort(
+        list: List<File>,
+        key: SortKey,
+        ascending: Boolean,
+        dirSizes: Map<String, Long> = emptyMap()
+    ): List<File> {
         val byKey: Comparator<File> = when (key) {
             SortKey.NAME -> compareBy<File> { it.name.lowercase() }
             SortKey.DATE -> compareBy<File> { it.lastModified() }
-            SortKey.SIZE -> compareBy<File> { if (it.isDirectory) 0L else it.length() }
+            SortKey.SIZE -> compareBy<File> {
+                if (it.isDirectory) (dirSizes[it.absolutePath] ?: 0L) else it.length()
+            }
         }
         val ordered = if (ascending) byKey else byKey.reversed()
-        return list.sortedWith(compareByDescending<File> { it.isDirectory }.then(ordered))
+        val full = if (key == SortKey.SIZE) ordered else compareByDescending<File> { it.isDirectory }.then(ordered)
+        return list.sortedWith(full)
     }
 
     /** Gera um nome livre no destino: "foto.jpg" vira "foto (1).jpg" se já existir. */
