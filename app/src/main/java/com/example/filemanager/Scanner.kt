@@ -18,6 +18,7 @@ enum class Category(val label: String, val icon: String, val exts: Set<String>) 
         "Documentos", "📄",
         setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "odt", "ods", "odp", "csv", "epub", "rtf", "md")
     ),
+    ARCHIVES("Compactados", "📦", setOf("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz")),
     APKS("APKs", "🤖", setOf("apk", "xapk", "apks", "apkm"))
 }
 
@@ -36,7 +37,8 @@ data class SpaceReport(
     val scannedBytes: Long,
     val byCategory: List<Pair<String, Long>>,
     val folders: List<Pair<File, Long>>,
-    val bigFiles: List<File>
+    val bigFiles: List<File>,
+    val recentFiles: List<File>
 )
 
 data class DupGroup(val size: Long, val files: List<File>) {
@@ -100,6 +102,7 @@ object Scanner {
         val catSizes = LinkedHashMap<Category?, Long>()
         val topFolders = HashMap<String, Long>()
         val heap = PriorityQueue<Pair<Long, File>>(16, compareBy<Pair<Long, File>> { it.first })
+        val recent = PriorityQueue<Pair<Long, File>>(16, compareBy<Pair<Long, File>> { it.first })
         val rootPath = root.absolutePath
         var scanned = 0L
         var n = 0
@@ -124,6 +127,16 @@ object Scanner {
                 heap.poll()
                 heap.add(len to f)
             }
+
+            if (!f.name.startsWith(".")) {
+                val modified = f.lastModified()
+                if (recent.size < 15) {
+                    recent.add(modified to f)
+                } else if (modified > recent.peek().first) {
+                    recent.poll()
+                    recent.add(modified to f)
+                }
+            }
         }
 
         return SpaceReport(
@@ -137,7 +150,8 @@ object Scanner {
                 .sortedByDescending { it.value }
                 .take(15)
                 .map { File(root, it.key) to it.value },
-            bigFiles = heap.sortedByDescending { it.first }.map { it.second }
+            bigFiles = heap.sortedByDescending { it.first }.map { it.second },
+            recentFiles = recent.sortedByDescending { it.first }.map { it.second }
         )
     }
 

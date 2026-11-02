@@ -1,4 +1,4 @@
-# Gerenciador de Arquivos (fase 4)
+# Gerenciador de Arquivos (v0.5)
 
 Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compose + Material 3).
 
@@ -9,6 +9,8 @@ Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compos
 **Fase 3:** lixeira (restaurar, excluir de vez, esvaziar), compactar em ZIP, extrair ZIP (toque no .zip ou menu da seleção) e compartilhar arquivos com outros apps.
 
 **Fase 4:** categorias (Imagens, Vídeos, Áudio, Documentos, APKs), analisador de espaço, localizador de duplicados (SHA-256) e detalhes de itens/pastas.
+
+**Tela inicial:** cartões de armazenamento e memória, botões redondos (ferramentas, pastas, mídia), arquivos recentes e menu lateral.
 
 ## Compilar na nuvem (GitHub Actions)
 1. Crie um repositório no GitHub e envie todos os arquivos desta pasta (inclusive `.github`).

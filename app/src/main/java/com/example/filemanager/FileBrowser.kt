@@ -73,10 +73,11 @@ private sealed interface DialogState {
     data class Details(val files: List<File>) : DialogState
 }
 
-/** Tela principal: o navegador de arquivos, com as ferramentas (lixeira, categorias etc.) por cima. */
+/** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
 @Composable
 fun FileBrowserScreen() {
     val storage = remember { Environment.getExternalStorageDirectory() }
+    var home by rememberSaveable { mutableStateOf(true) }
     var tool by rememberSaveable { mutableStateOf("") } // "" = nenhuma ferramenta aberta
     var toolChanges by remember { mutableIntStateOf(0) }
     var jumpTo by remember { mutableStateOf<String?>(null) }
@@ -91,8 +92,22 @@ fun FileBrowserScreen() {
             refreshSignal = toolChanges,
             onOpenTool = { tool = it },
             jumpRequest = jumpTo,
-            onJumpHandled = { jumpTo = null }
+            onJumpHandled = { jumpTo = null },
+            active = !home && tool.isEmpty(),
+            onGoHome = { home = true }
         )
+        if (home) {
+            Surface(Modifier.fillMaxSize()) {
+                HomeScreen(
+                    storage = storage,
+                    onOpenFolder = { dir ->
+                        jumpTo = dir.absolutePath
+                        home = false
+                    },
+                    onOpenTool = { tool = it }
+                )
+            }
+        }
         if (tool.isNotEmpty()) {
             Surface(Modifier.fillMaxSize()) {
                 ToolHost(
@@ -101,6 +116,7 @@ fun FileBrowserScreen() {
                     onClose = { closeTool() },
                     onShowInFolder = { dir ->
                         jumpTo = dir.absolutePath
+                        home = false
                         closeTool()
                     }
                 )
@@ -115,7 +131,9 @@ private fun BrowserContent(
     refreshSignal: Int,
     onOpenTool: (String) -> Unit,
     jumpRequest: String?,
-    onJumpHandled: () -> Unit
+    onJumpHandled: () -> Unit,
+    active: Boolean,
+    onGoHome: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -242,14 +260,15 @@ private fun BrowserContent(
         }
     }
 
-    BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
-    BackHandler(enabled = selected.isEmpty() && searching) {
+    BackHandler(enabled = active && selected.isNotEmpty()) { selected = emptySet() }
+    BackHandler(enabled = active && selected.isEmpty() && searching) {
         searching = false
         query = ""
     }
-    BackHandler(enabled = selected.isEmpty() && !searching && canGoUp) {
+    BackHandler(enabled = active && selected.isEmpty() && !searching && canGoUp) {
         current.parentFile?.let { navigateTo(it) }
     }
+    BackHandler(enabled = active && selected.isEmpty() && !searching && !canGoUp) { onGoHome() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -274,6 +293,8 @@ private fun BrowserContent(
                             TextButton(onClick = { current.parentFile?.let { navigateTo(it) } }) {
                                 Text("←")
                             }
+                        } else {
+                            TextButton(onClick = onGoHome) { Text("⌂") }
                         }
                     },
                     actions = {
