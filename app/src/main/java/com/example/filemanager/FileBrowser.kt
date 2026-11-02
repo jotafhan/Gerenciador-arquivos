@@ -5,6 +5,7 @@ import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -67,11 +69,35 @@ private sealed interface DialogState {
     data object NewFolder : DialogState
     data class Rename(val file: File) : DialogState
     data class Delete(val files: List<File>) : DialogState
+    data class ZipChoice(val file: File) : DialogState
+}
+
+/** Tela principal: o navegador de arquivos, com a lixeira por cima quando aberta. */
+@Composable
+fun FileBrowserScreen() {
+    val storage = remember { Environment.getExternalStorageDirectory() }
+    var showTrash by rememberSaveable { mutableStateOf(false) }
+    var trashChanges by remember { mutableIntStateOf(0) }
+
+    Box(Modifier.fillMaxSize()) {
+        BrowserContent(refreshSignal = trashChanges, onOpenTrash = { showTrash = true })
+        if (showTrash) {
+            Surface(Modifier.fillMaxSize()) {
+                TrashScreen(
+                    storage = storage,
+                    onClose = {
+                        showTrash = false
+                        trashChanges++
+                    }
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FileBrowserScreen() {
+private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val root = remember { Environment.getExternalStorageDirectory() }
@@ -90,6 +116,7 @@ fun FileBrowserScreen() {
     var dialog by remember { mutableStateOf<DialogState?>(null) }
     var busy by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var moreOpen by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val focusRequester = remember { FocusRequester() }
 
@@ -99,7 +126,7 @@ fun FileBrowserScreen() {
     val title = if (canGoUp) current.name else "Armazenamento interno"
     val inSearch = searching && query.isNotBlank()
 
-    val folderEntries = remember(currentPath, showHidden, sortName, ascending, refreshKey) {
+    val folderEntries = remember(currentPath, showHidden, sortName, ascending, refreshKey, refreshSignal) {
         FileOps.sort(FileOps.list(File(currentPath), showHidden), sortKey, ascending)
     }
 
@@ -132,6 +159,13 @@ fun FileBrowserScreen() {
                 val dir = File(root, name)
                 if (dir.isDirectory) add(name to dir)
             }
+        }
+    }
+
+    fun say(msg: String) {
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(msg)
         }
     }
 
@@ -264,13 +298,62 @@ fun FileBrowserScreen() {
                         clipboard = Clipboard(files.map { it.absolutePath }, move = true)
                         selected = emptySet()
                     }) { Text("Mover") }
-                    if (files.size == 1) {
-                        TextButton(onClick = { dialog = DialogState.Rename(files.first()) }) {
-                            Text("Renomear")
-                        }
-                    }
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = { dialog = DialogState.Delete(files) }) { Text("Excluir") }
+                    Box {
+                        TextButton(onClick = { moreOpen = true }) { Text("⋮") }
+                        DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                            if (files.size == 1) {
+                                DropdownMenuItem(
+                                    text = { Text("Renomear") },
+                                    onClick = {
+                                        moreOpen = false
+                                        dialog = DialogState.Rename(files.first())
+                                    }
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Compactar em ZIP") },
+                                onClick = {
+                                    moreOpen = false
+                                    val dest = current
+                                    runOp("ZIP criado") {
+                                        Zip.compress(files, dest).exceptionOrNull()
+                                            ?.let { listOf(it.message ?: "Erro ao compactar") }
+                                            ?: emptyList()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Compartilhar") },
+                                onClick = {
+                                    moreOpen = false
+                                    if (files.any { it.isDirectory }) {
+                                        say("Pastas não podem ser compartilhadas. Compacte em ZIP primeiro.")
+                                    } else {
+                                        FileOpener.share(context, files)
+                                        selected = emptySet()
+                                    }
+                                }
+                            )
+                            val zipFile = files.singleOrNull()
+                                ?.takeIf { it.isFile && it.extension.equals("zip", ignoreCase = true) }
+                            if (zipFile != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Extrair aqui") },
+                                    onClick = {
+                                        moreOpen = false
+                                        val dest = zipFile.parentFile ?: current
+                                        runOp("Extraído") {
+                                            Zip.extract(zipFile, dest).exceptionOrNull()
+                                                ?.let { listOf(it.message ?: "Erro ao extrair") }
+                                                ?: emptyList()
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             } else if (cb != null) {
                 BottomAppBar {
@@ -326,6 +409,9 @@ fun FileBrowserScreen() {
                     items(shortcuts) { (label, dir) ->
                         AssistChip(onClick = { navigateTo(dir) }, label = { Text(label) })
                     }
+                    item {
+                        AssistChip(onClick = onOpenTrash, label = { Text("🗑️ Lixeira") })
+                    }
                 }
             }
 
@@ -364,6 +450,9 @@ fun FileBrowserScreen() {
                                         }
                                     }
                                     file.isDirectory -> navigateTo(file)
+                                    file.extension.equals("zip", ignoreCase = true) -> {
+                                        dialog = DialogState.ZipChoice(file)
+                                    }
                                     else -> FileOpener.open(context, file)
                                 }
                             },
@@ -415,24 +504,206 @@ fun FileBrowserScreen() {
                 }
             }
         )
-        is DialogState.Delete -> AlertDialog(
-            onDismissRequest = { dialog = null },
-            title = { Text("Excluir ${d.files.size} item(ns)?") },
-            text = { Text("Isso apaga de forma permanente. Ainda não existe lixeira.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    val toDelete = d.files
-                    dialog = null
-                    runOp("Excluído") {
-                        toDelete.mapNotNull { f ->
-                            if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
+        is DialogState.Delete -> {
+            val toDelete = d.files
+            val allInTrash = toDelete.all { Trash.isInTrash(root, it) }
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                title = { Text("Excluir ${toDelete.size} item(ns)?") },
+                text = {
+                    Text(
+                        if (allInTrash) {
+                            "Itens que já estão na lixeira são apagados de forma permanente."
+                        } else {
+                            "Na lixeira você pode restaurar depois. \"Excluir de vez\" apaga permanentemente."
+                        }
+                    )
+                },
+                confirmButton = {
+                    Row {
+                        TextButton(onClick = {
+                            dialog = null
+                            runOp("Excluído de vez") {
+                                toDelete.mapNotNull { f ->
+                                    if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
+                                }
+                            }
+                        }) { Text("Excluir de vez") }
+                        if (!allInTrash) {
+                            TextButton(onClick = {
+                                dialog = null
+                                runOp("Movido para a lixeira") {
+                                    toDelete.mapNotNull { f ->
+                                        if (Trash.isInTrash(root, f)) {
+                                            if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
+                                        } else {
+                                            Trash.moveToTrash(root, f).exceptionOrNull()
+                                                ?.let { "${f.name}: ${it.message}" }
+                                        }
+                                    }
+                                }
+                            }) { Text("Lixeira") }
                         }
                     }
-                }) { Text("Excluir") }
-            },
-            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancelar") } }
-        )
+                },
+                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancelar") } }
+            )
+        }
+        is DialogState.ZipChoice -> {
+            val zipFile = d.file
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                title = { Text(zipFile.name) },
+                text = { Text("O que fazer com este arquivo ZIP?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        dialog = null
+                        val dest = zipFile.parentFile ?: current
+                        runOp("Extraído") {
+                            Zip.extract(zipFile, dest).exceptionOrNull()
+                                ?.let { listOf(it.message ?: "Erro ao extrair") }
+                                ?: emptyList()
+                        }
+                    }) { Text("Extrair aqui") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        dialog = null
+                        FileOpener.open(context, zipFile)
+                    }) { Text("Abrir com outro app") }
+                }
+            )
+        }
         null -> {}
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TrashScreen(storage: File, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    var refreshKey by remember { mutableIntStateOf(0) }
+    var items by remember { mutableStateOf<List<Trash.Entry>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var picked by remember { mutableStateOf<Trash.Entry?>(null) }
+    var confirmEmpty by remember { mutableStateOf(false) }
+
+    LaunchedEffect(refreshKey) {
+        loading = true
+        items = withContext(Dispatchers.IO) { Trash.list(storage) }
+        loading = false
+    }
+
+    BackHandler { onClose() }
+
+    /** Roda [work] em segundo plano; devolve uma mensagem de erro ou null se deu certo. */
+    fun act(successMessage: String, work: () -> String?) {
+        scope.launch {
+            val error = withContext(Dispatchers.IO) { work() }
+            refreshKey++
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(error ?: successMessage)
+        }
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Lixeira") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("←") } },
+                actions = {
+                    TextButton(onClick = { confirmEmpty = true }, enabled = items.isNotEmpty()) {
+                        Text("Esvaziar")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            when {
+                loading -> LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                items.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("A lixeira está vazia")
+                }
+                else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(items, key = { it.dir.name }) { entry ->
+                        val date = remember(entry.dir.name) {
+                            DateFormat.getDateTimeInstance().format(Date(entry.deletedAt))
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { picked = entry }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(iconFor(entry.item), style = MaterialTheme.typography.titleLarge)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.item.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val size = if (entry.item.isFile) {
+                                    Formatter.formatFileSize(context, entry.item.length()) + "  •  "
+                                } else ""
+                                Text(
+                                    text = "$size$date\nDe: ${entry.origin.substringBeforeLast('/')}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+
+    picked?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { picked = null },
+            title = { Text(entry.item.name) },
+            text = { Text("Local original:\n${entry.origin}") },
+            confirmButton = {
+                TextButton(onClick = {
+                    picked = null
+                    act("Restaurado") {
+                        Trash.restore(entry).exceptionOrNull()?.message?.let { "Erro: $it" }
+                    }
+                }) { Text("Restaurar") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    picked = null
+                    act("Excluído de vez") {
+                        if (Trash.purge(entry)) null else "Não foi possível excluir"
+                    }
+                }) { Text("Excluir de vez") }
+            }
+        )
+    }
+
+    if (confirmEmpty) {
+        AlertDialog(
+            onDismissRequest = { confirmEmpty = false },
+            title = { Text("Esvaziar a lixeira?") },
+            text = { Text("Todos os itens serão apagados de forma permanente.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmEmpty = false
+                    act("Lixeira esvaziada") {
+                        if (Trash.empty(storage)) null else "Alguns itens não puderam ser apagados"
+                    }
+                }) { Text("Esvaziar") }
+            },
+            dismissButton = { TextButton(onClick = { confirmEmpty = false }) { Text("Cancelar") } }
+        )
     }
 }
 
