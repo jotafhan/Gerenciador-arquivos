@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
@@ -185,6 +186,8 @@ internal fun CategoryScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<File?>(null) }
 
+    val listState = rememberLazyListState()
+    LaunchedEffect(sortName, ascending) { listState.scrollToItem(0) }
     LaunchedEffect(cat) {
         loading = true
         found = withContext(Dispatchers.IO) { Scanner.findCategory(storage, cat) }
@@ -259,7 +262,7 @@ internal fun CategoryScreen(
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(sorted, key = { it.file.absolutePath }) { item ->
                         FileRow(
                             file = item.file,

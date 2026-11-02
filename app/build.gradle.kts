@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.filemanager"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.5.1"
+        versionCode = 8
+        versionName = "0.6.0"
     }
 
     buildTypes {
@@ -36,12 +36,28 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        resources {
+            // Arquivos de licença repetidos entre as bibliotecas
+            excludes += listOf(
+                "/META-INF/LICENSE*",
+                "/META-INF/NOTICE*",
+                "/META-INF/DEPENDENCIES",
+                "/META-INF/INDEX.LIST",
+                "/META-INF/versions/**"
+            )
+        }
+    }
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Formatos de compactação: 7z/TAR/GZ/BZ2/XZ (commons-compress + xz) e RAR (junrar)
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.tukaani:xz:1.10")
+    implementation("com.github.junrar:junrar:7.5.5")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)

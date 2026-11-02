@@ -137,6 +137,10 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
     val mediaItems = Category.entries.filter { it != Category.APKS }.map { cat ->
         HomeItem(cat.icon, cat.label, colorFor(cat)) { onOpenTool(cat.name) }
     }
+    val appItems = listOf(
+        HomeItem("📲", "Aplicativos", Color(0xFF5C6BC0)) { onOpenTool(TOOL_APPS) },
+        HomeItem(Category.APKS.icon, Category.APKS.label, colorFor(Category.APKS)) { onOpenTool(Category.APKS.name) }
+    )
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -234,6 +238,8 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                 item { ButtonGrid(tools) }
                 item { SectionHeader("MÍDIA") }
                 item { ButtonGrid(mediaItems) }
+                item { SectionHeader("APPS") }
+                item { ButtonGrid(appItems) }
                 item {
                     CollapsibleHeader("RECENTE", recentExpanded) {
                         recentExpanded = !recentExpanded

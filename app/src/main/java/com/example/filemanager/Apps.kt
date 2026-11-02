@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -117,6 +118,9 @@ internal fun AppsScreen(storage: File, onClose: () -> Unit) {
     var ascending by rememberSaveable { mutableStateOf(true) }
     var menuOpen by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<AppInfo?>(null) }
+
+    val listState = rememberLazyListState()
+    LaunchedEffect(sortName, ascending, tab) { listState.scrollToItem(0) }
 
     LaunchedEffect(refreshKey) {
         apps = withContext(Dispatchers.IO) { loadApps(pm) }
@@ -250,7 +254,7 @@ internal fun AppsScreen(storage: File, onClose: () -> Unit) {
                 shown.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("Nenhum aplicativo encontrado")
                 }
-                else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                else -> LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(shown, key = { it.pkg }) { app ->
                         AppRow(app = app, pm = pm, onClick = { picked = app })
                         HorizontalDivider()

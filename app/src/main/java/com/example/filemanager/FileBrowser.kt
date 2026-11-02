@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.BottomAppBar
@@ -71,6 +72,7 @@ private sealed interface DialogState {
     data class Delete(val files: List<File>) : DialogState
     data class ZipChoice(val file: File) : DialogState
     data class Details(val files: List<File>) : DialogState
+    data class Compress(val files: List<File>) : DialogState
 }
 
 /** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
@@ -156,6 +158,9 @@ private fun BrowserContent(
     var moreOpen by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val focusRequester = remember { FocusRequester() }
+    val listState = rememberLazyListState()
+    // Ao mudar a ordenação (ou de pasta), volta ao primeiro item da lista
+    LaunchedEffect(currentPath, sortName, ascending) { listState.scrollToItem(0) }
 
     val current = File(currentPath)
     val sortKey = SortKey.valueOf(sortName)
@@ -403,15 +408,10 @@ private fun BrowserContent(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Compactar em ZIP") },
+                                text = { Text("Compactar...") },
                                 onClick = {
                                     moreOpen = false
-                                    val dest = current
-                                    runOp("ZIP criado") {
-                                        Zip.compress(files, dest).exceptionOrNull()
-                                            ?.let { listOf(it.message ?: "Erro ao compactar") }
-                                            ?: emptyList()
-                                    }
+                                    dialog = DialogState.Compress(files)
                                 }
                             )
                             DropdownMenuItem(
@@ -427,7 +427,7 @@ private fun BrowserContent(
                                 }
                             )
                             val zipFile = files.singleOrNull()
-                                ?.takeIf { it.isFile && it.extension.equals("zip", ignoreCase = true) }
+                                ?.takeIf { Archives.isArchive(it) }
                             if (zipFile != null) {
                                 DropdownMenuItem(
                                     text = { Text("Extrair aqui") },
@@ -435,7 +435,7 @@ private fun BrowserContent(
                                         moreOpen = false
                                         val dest = zipFile.parentFile ?: current
                                         runOp("Extraído") {
-                                            Zip.extract(zipFile, dest).exceptionOrNull()
+                                            Archives.extract(zipFile, dest).exceptionOrNull()
                                                 ?.let { listOf(it.message ?: "Erro ao extrair") }
                                                 ?: emptyList()
                                         }
@@ -529,7 +529,7 @@ private fun BrowserContent(
             if (message != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(message) }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(entries, key = { it.absolutePath }) { file ->
                         FileRow(
                             file = file,
@@ -547,7 +547,7 @@ private fun BrowserContent(
                                         }
                                     }
                                     file.isDirectory -> navigateTo(file)
-                                    file.extension.equals("zip", ignoreCase = true) -> {
+                                    Archives.isArchive(file) -> {
                                         dialog = DialogState.ZipChoice(file)
                                     }
                                     else -> FileOpener.open(context, file)
@@ -651,13 +651,13 @@ private fun BrowserContent(
             AlertDialog(
                 onDismissRequest = { dialog = null },
                 title = { Text(zipFile.name) },
-                text = { Text("O que fazer com este arquivo ZIP?") },
+                text = { Text("O que fazer com este arquivo compactado?") },
                 confirmButton = {
                     TextButton(onClick = {
                         dialog = null
                         val dest = zipFile.parentFile ?: current
                         runOp("Extraído") {
-                            Zip.extract(zipFile, dest).exceptionOrNull()
+                            Archives.extract(zipFile, dest).exceptionOrNull()
                                 ?.let { listOf(it.message ?: "Erro ao extrair") }
                                 ?: emptyList()
                         }
@@ -669,6 +669,24 @@ private fun BrowserContent(
                         FileOpener.open(context, zipFile)
                     }) { Text("Abrir com outro app") }
                 }
+            )
+        }
+        is DialogState.Compress -> {
+            val toPack = d.files
+            val dest = current
+            ActionsDialog(
+                title = "Compactar ${toPack.size} item(ns)",
+                info = "Escolha o formato do arquivo",
+                actions = ArchiveFormat.entries.map { format ->
+                    Act(format.label) {
+                        runOp("${format.label} criado") {
+                            Archives.compress(toPack, dest, format).exceptionOrNull()
+                                ?.let { listOf(it.message ?: "Erro ao compactar") }
+                                ?: emptyList()
+                        }
+                    }
+                },
+                onDismiss = { dialog = null }
             )
         }
         is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
