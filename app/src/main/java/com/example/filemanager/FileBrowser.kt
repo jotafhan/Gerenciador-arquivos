@@ -70,24 +70,38 @@ private sealed interface DialogState {
     data class Rename(val file: File) : DialogState
     data class Delete(val files: List<File>) : DialogState
     data class ZipChoice(val file: File) : DialogState
+    data class Details(val files: List<File>) : DialogState
 }
 
-/** Tela principal: o navegador de arquivos, com a lixeira por cima quando aberta. */
+/** Tela principal: o navegador de arquivos, com as ferramentas (lixeira, categorias etc.) por cima. */
 @Composable
 fun FileBrowserScreen() {
     val storage = remember { Environment.getExternalStorageDirectory() }
-    var showTrash by rememberSaveable { mutableStateOf(false) }
-    var trashChanges by remember { mutableIntStateOf(0) }
+    var tool by rememberSaveable { mutableStateOf("") } // "" = nenhuma ferramenta aberta
+    var toolChanges by remember { mutableIntStateOf(0) }
+    var jumpTo by remember { mutableStateOf<String?>(null) }
+
+    fun closeTool() {
+        tool = ""
+        toolChanges++
+    }
 
     Box(Modifier.fillMaxSize()) {
-        BrowserContent(refreshSignal = trashChanges, onOpenTrash = { showTrash = true })
-        if (showTrash) {
+        BrowserContent(
+            refreshSignal = toolChanges,
+            onOpenTool = { tool = it },
+            jumpRequest = jumpTo,
+            onJumpHandled = { jumpTo = null }
+        )
+        if (tool.isNotEmpty()) {
             Surface(Modifier.fillMaxSize()) {
-                TrashScreen(
+                ToolHost(
+                    tool = tool,
                     storage = storage,
-                    onClose = {
-                        showTrash = false
-                        trashChanges++
+                    onClose = { closeTool() },
+                    onShowInFolder = { dir ->
+                        jumpTo = dir.absolutePath
+                        closeTool()
                     }
                 )
             }
@@ -97,7 +111,12 @@ fun FileBrowserScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
+private fun BrowserContent(
+    refreshSignal: Int,
+    onOpenTool: (String) -> Unit,
+    jumpRequest: String?,
+    onJumpHandled: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val root = remember { Environment.getExternalStorageDirectory() }
@@ -176,6 +195,13 @@ private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
         query = ""
     }
 
+    LaunchedEffect(jumpRequest) {
+        jumpRequest?.let {
+            navigateTo(File(it))
+            onJumpHandled()
+        }
+    }
+
     /** Roda [work] em segundo plano; ele devolve a lista de mensagens de erro (vazia = sucesso). */
     fun runOp(successMessage: String, work: () -> List<String>) {
         scope.launch {
@@ -246,6 +272,20 @@ private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
                                         dialog = DialogState.NewFolder
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Analisar espaço") },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenTool(TOOL_SPACE)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Achar duplicados") },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenTool(TOOL_DUPLICATES)
+                                    }
+                                )
                                 SortKey.entries.forEach { key ->
                                     val arrow = if (key == sortKey) {
                                         if (ascending) " ↑" else " ↓"
@@ -312,6 +352,13 @@ private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
                                     }
                                 )
                             }
+                            DropdownMenuItem(
+                                text = { Text("Detalhes") },
+                                onClick = {
+                                    moreOpen = false
+                                    dialog = DialogState.Details(files)
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Compactar em ZIP") },
                                 onClick = {
@@ -409,8 +456,14 @@ private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
                     items(shortcuts) { (label, dir) ->
                         AssistChip(onClick = { navigateTo(dir) }, label = { Text(label) })
                     }
+                    items(Category.entries.toList()) { cat ->
+                        AssistChip(
+                            onClick = { onOpenTool(cat.name) },
+                            label = { Text("${cat.icon} ${cat.label}") }
+                        )
+                    }
                     item {
-                        AssistChip(onClick = onOpenTrash, label = { Text("🗑️ Lixeira") })
+                        AssistChip(onClick = { onOpenTool(TOOL_TRASH) }, label = { Text("🗑️ Lixeira") })
                     }
                 }
             }
@@ -574,13 +627,14 @@ private fun BrowserContent(refreshSignal: Int, onOpenTrash: () -> Unit) {
                 }
             )
         }
+        is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
         null -> {}
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TrashScreen(storage: File, onClose: () -> Unit) {
+internal fun TrashScreen(storage: File, onClose: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -674,7 +728,7 @@ private fun TrashScreen(storage: File, onClose: () -> Unit) {
                 TextButton(onClick = {
                     picked = null
                     act("Restaurado") {
-                        Trash.restore(entry).exceptionOrNull()?.message?.let { "Erro: $it" }
+                        Trash.restore(entry).exceptionOrNull()?.let { "Erro: ${it.message ?: "falha ao restaurar"}" }
                     }
                 }) { Text("Restaurar") }
             },
@@ -737,7 +791,7 @@ private fun TextInputDialog(
     )
 }
 
-private fun iconFor(file: File): String {
+internal fun iconFor(file: File): String {
     if (file.isDirectory) return "📁"
     return when (file.extension.lowercase()) {
         "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> "🖼️"
@@ -751,7 +805,7 @@ private fun iconFor(file: File): String {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FileRow(
+internal fun FileRow(
     file: File,
     extra: String?,
     selectionMode: Boolean,
