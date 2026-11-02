@@ -54,6 +54,7 @@ import java.util.Date
 const val TOOL_TRASH = "TRASH"
 const val TOOL_SPACE = "SPACE"
 const val TOOL_DUPLICATES = "DUPLICATES"
+const val TOOL_APPS = "APPS"
 
 private fun fmt(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
@@ -64,6 +65,7 @@ fun ToolHost(tool: String, storage: File, onClose: () -> Unit, onShowInFolder: (
         TOOL_TRASH -> TrashScreen(storage = storage, onClose = onClose)
         TOOL_SPACE -> SpaceScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
         TOOL_DUPLICATES -> DuplicatesScreen(storage = storage, onClose = onClose)
+        TOOL_APPS -> AppsScreen(storage = storage, onClose = onClose)
         else -> {
             val cat = Category.entries.firstOrNull { it.name == tool }
             if (cat != null) {
@@ -73,7 +75,7 @@ fun ToolHost(tool: String, storage: File, onClose: () -> Unit, onShowInFolder: (
     }
 }
 
-private class Act(val label: String, val run: () -> Unit)
+internal class Act(val label: String, val run: () -> Unit)
 
 private fun fileActions(
     context: Context,
@@ -88,7 +90,7 @@ private fun fileActions(
 )
 
 @Composable
-private fun ActionsDialog(title: String, info: String, actions: List<Act>, onDismiss: () -> Unit) {
+internal fun ActionsDialog(title: String, info: String, actions: List<Act>, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis) },

@@ -95,6 +95,8 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
     var refresh by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf(HomeCache.report) }
+    val prefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
+    var recentExpanded by remember { mutableStateOf(prefs.getBoolean("recent_expanded", true)) }
 
     // Varredura em segundo plano: tamanhos por tipo (menu lateral) e arquivos recentes
     LaunchedEffect(refresh) {
@@ -120,26 +122,6 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
         info.totalMem to info.availMem
     }
 
-    val folders = remember {
-        buildList<Pair<String, File>> {
-            listOf(
-                "Downloads" to "Download",
-                "Câmera" to "DCIM/Camera",
-                "Documentos" to "Documents",
-                "Imagens" to "Pictures",
-                "Filmes" to "Movies",
-                "Música" to "Music"
-            ).forEach { (label, rel) ->
-                val dir = File(storage, rel)
-                if (dir.isDirectory) add(label to dir)
-            }
-            listOf("Pictures/Screenshots", "DCIM/Screenshots")
-                .map { File(storage, it) }
-                .firstOrNull { it.isDirectory }
-                ?.let { add("Capturas de tela" to it) }
-        }
-    }
-
     fun go(action: () -> Unit) {
         scope.launch { drawerState.close() }
         action()
@@ -152,10 +134,7 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
         HomeItem("👯", "Duplicados", Color(0xFF43A047)) { onOpenTool(TOOL_DUPLICATES) },
         HomeItem("🗑️", "Lixeira", Color(0xFF757575)) { onOpenTool(TOOL_TRASH) }
     )
-    val folderItems = folders.map { (label, dir) ->
-        HomeItem("📁", label, Color(0xFF4FA3C7)) { onOpenFolder(dir) }
-    }
-    val mediaItems = Category.entries.map { cat ->
+    val mediaItems = Category.entries.filter { it != Category.APKS }.map { cat ->
         HomeItem(cat.icon, cat.label, colorFor(cat)) { onOpenTool(cat.name) }
     }
 
@@ -175,17 +154,22 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         go { onOpenFolder(storage) }
                     }
                     DrawerSection("BIBLIOTECA")
-                    Category.entries.forEach { cat ->
+                    Category.entries.filter { it != Category.APKS }.forEach { cat ->
                         val bytes = report?.byCategory?.firstOrNull { it.first == cat.label }?.second
                         DrawerEntry(cat.icon, cat.label, bytes?.let { humanSize(context, it) }, false) {
                             go { onOpenTool(cat.name) }
                         }
                     }
                     DrawerEntry("🗑️", "Lixeira", null, false) { go { onOpenTool(TOOL_TRASH) } }
-                    DrawerSection("PASTAS")
-                    folders.forEach { (label, dir) ->
-                        DrawerEntry("📁", label, null, false) { go { onOpenFolder(dir) } }
-                    }
+                    DrawerSection("APPS")
+                    DrawerEntry("📲", "Aplicativos instalados", null, false) { go { onOpenTool(TOOL_APPS) } }
+                    DrawerEntry(
+                        "🤖",
+                        "APKs",
+                        report?.byCategory?.firstOrNull { it.first == Category.APKS.label }?.second
+                            ?.let { humanSize(context, it) },
+                        false
+                    ) { go { onOpenTool(Category.APKS.name) } }
                     DrawerSection("FERRAMENTAS")
                     DrawerEntry("📊", "Analisar espaço", null, false) { go { onOpenTool(TOOL_SPACE) } }
                     DrawerEntry("👯", "Achar duplicados", null, false) { go { onOpenTool(TOOL_DUPLICATES) } }
@@ -248,16 +232,19 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                 }
                 item { SectionHeader("FERRAMENTAS") }
                 item { ButtonGrid(tools) }
-                if (folderItems.isNotEmpty()) {
-                    item { SectionHeader("PASTAS") }
-                    item { ButtonGrid(folderItems) }
-                }
                 item { SectionHeader("MÍDIA") }
                 item { ButtonGrid(mediaItems) }
-                item { SectionHeader("RECENTE") }
+                item {
+                    CollapsibleHeader("RECENTE", recentExpanded) {
+                        recentExpanded = !recentExpanded
+                        prefs.edit().putBoolean("recent_expanded", recentExpanded).apply()
+                    }
+                }
 
                 val recent = report?.recentFiles
-                if (recent == null) {
+                if (!recentExpanded) {
+                    // minimizado: não mostra a lista
+                } else if (recent == null) {
                     item { Text("Carregando...", modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
                 } else if (recent.isEmpty()) {
                     item { Text("Nada por aqui ainda", modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
@@ -399,6 +386,29 @@ private fun DrawerEntry(icon: String, label: String, badge: String?, selected: B
             onClick = onClick,
             icon = { Text(icon) },
             modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+        )
+    }
+}
+
+@Composable
+private fun CollapsibleHeader(text: String, expanded: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = if (expanded) "▲" else "▼",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

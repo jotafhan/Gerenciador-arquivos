@@ -12,6 +12,9 @@
         android:maxSdkVersion="29" />
     <!-- Necessário para abrir/instalar arquivos .apk a partir do gerenciador -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Listar os aplicativos instalados e desinstalar -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!-- Permite instalar em TVs e aparelhos sem touchscreen -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
