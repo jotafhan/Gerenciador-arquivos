@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -29,6 +30,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -73,6 +75,9 @@ private sealed interface DialogState {
     data class ZipChoice(val file: File) : DialogState
     data class Details(val files: List<File>) : DialogState
     data class Compress(val files: List<File>) : DialogState
+    data class CopyMoveTo(val files: List<File>, val move: Boolean) : DialogState
+    data class Metadata(val file: File) : DialogState
+    data class MoveUp(val dir: File) : DialogState
 }
 
 /** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
@@ -156,6 +161,17 @@ private fun BrowserContent(
     var busy by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
+    var selectMenuOpen by remember { mutableStateOf(false) }
+    var selectedBytes by remember { mutableStateOf<Long?>(null) }
+
+    // Tamanho total dos itens selecionados (pastas incluem o conteúdo)
+    LaunchedEffect(selected) {
+        selectedBytes = null
+        if (selected.isNotEmpty()) {
+            delay(150)
+            selectedBytes = withContext(Dispatchers.IO) { Scanner.measure(selected.map { File(it) }).bytes }
+        }
+    }
     val snackbar = remember { SnackbarHostState() }
     val focusRequester = remember { FocusRequester() }
     val listState = rememberLazyListState()
@@ -279,14 +295,203 @@ private fun BrowserContent(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             if (selected.isNotEmpty()) {
+                val files = entries.filter { it.absolutePath in selected }
+                val one = files.singleOrNull()
+                val sel = selected
+                val sizeText = selectedBytes?.let { Formatter.formatFileSize(context, it) } ?: "…"
                 TopAppBar(
-                    title = { Text("${selected.size} selecionado(s)") },
                     navigationIcon = {
-                        TextButton(onClick = { selected = emptySet() }) { Text("✕") }
+                        Box {
+                            TextButton(onClick = { selectMenuOpen = true }) { Text("☑ ▾") }
+                            DropdownMenu(expanded = selectMenuOpen, onDismissRequest = { selectMenuOpen = false }) {
+                                val all = entries.map { it.absolutePath }.toSet()
+                                fun choose(newSelection: Set<String>) {
+                                    selected = newSelection
+                                    selectMenuOpen = false
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Alternar") },
+                                    onClick = { choose(if (sel.size == all.size) emptySet() else all) }
+                                )
+                                DropdownMenuItem(text = { Text("Inverter") }, onClick = { choose(all - sel) })
+                                DropdownMenuItem(
+                                    text = { Text("Anterior") },
+                                    onClick = {
+                                        val i = entries.indexOfFirst { it.absolutePath in sel }
+                                        choose(if (i > 0) sel + entries[i - 1].absolutePath else sel)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Próxima") },
+                                    onClick = {
+                                        val i = entries.indexOfLast { it.absolutePath in sel }
+                                        choose(if (i >= 0 && i < entries.size - 1) sel + entries[i + 1].absolutePath else sel)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Apenas arquivos") },
+                                    onClick = { choose(entries.filter { it.isFile }.map { it.absolutePath }.toSet()) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Mesma extensão") },
+                                    onClick = {
+                                        val exts = files.filter { it.isFile }.map { it.extension.lowercase() }.toSet()
+                                        choose(
+                                            if (exts.isEmpty()) sel
+                                            else entries.filter { it.isFile && it.extension.lowercase() in exts }
+                                                .map { it.absolutePath }.toSet()
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Mesmo tipo") },
+                                    onClick = {
+                                        val kinds = files.map { typeKey(it) }.toSet()
+                                        choose(entries.filter { typeKey(it) in kinds }.map { it.absolutePath }.toSet())
+                                    }
+                                )
+                                DropdownMenuItem(text = { Text("Nenhum") }, onClick = { choose(emptySet()) })
+                                DropdownMenuItem(text = { Text("Todos") }, onClick = { choose(all) })
+                            }
+                        }
+                    },
+                    title = {
+                        Column {
+                            Text("${selected.size}", style = MaterialTheme.typography.titleMedium)
+                            Text(sizeText, style = MaterialTheme.typography.labelSmall)
+                        }
                     },
                     actions = {
-                        TextButton(onClick = { selected = entries.map { it.absolutePath }.toSet() }) {
-                            Text("Todos")
+                        IconButton(
+                            onClick = { dialog = DialogState.Delete(files) },
+                            modifier = Modifier.size(40.dp)
+                        ) { Text("🗑️") }
+                        IconButton(
+                            onClick = {
+                                clipboard = Clipboard(files.map { it.absolutePath }, move = false)
+                                selected = emptySet()
+                            },
+                            modifier = Modifier.size(40.dp)
+                        ) { Text("📋") }
+                        IconButton(
+                            onClick = {
+                                clipboard = Clipboard(files.map { it.absolutePath }, move = true)
+                                selected = emptySet()
+                            },
+                            modifier = Modifier.size(40.dp)
+                        ) { Text("✂️") }
+                        if (one != null) {
+                            IconButton(
+                                onClick = { dialog = DialogState.Rename(one) },
+                                modifier = Modifier.size(40.dp)
+                            ) { Text("✏️") }
+                        }
+                        IconButton(
+                            onClick = { dialog = DialogState.Details(files) },
+                            modifier = Modifier.size(40.dp)
+                        ) { Text("ℹ️") }
+                        Box {
+                            IconButton(onClick = { moreOpen = true }, modifier = Modifier.size(40.dp)) { Text("⋮") }
+                            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Compartilhar") },
+                                    onClick = {
+                                        moreOpen = false
+                                        if (files.any { it.isDirectory }) {
+                                            say("Pastas não podem ser compartilhadas. Compacte em ZIP primeiro.")
+                                        } else {
+                                            FileOpener.share(context, files)
+                                            selected = emptySet()
+                                        }
+                                    }
+                                )
+                                if (one != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Abrir") },
+                                        onClick = {
+                                            moreOpen = false
+                                            if (one.isDirectory) navigateTo(one) else FileOpener.open(context, one)
+                                        }
+                                    )
+                                    if (one.isFile) {
+                                        DropdownMenuItem(
+                                            text = { Text("Abrir com...") },
+                                            onClick = {
+                                                moreOpen = false
+                                                FileOpener.openWith(context, one)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Metadados") },
+                                            onClick = {
+                                                moreOpen = false
+                                                dialog = DialogState.Metadata(one)
+                                            }
+                                        )
+                                    }
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Compactar...") },
+                                    onClick = {
+                                        moreOpen = false
+                                        dialog = DialogState.Compress(files)
+                                    }
+                                )
+                                if (one != null && Archives.isArchive(one)) {
+                                    DropdownMenuItem(
+                                        text = { Text("Extrair aqui") },
+                                        onClick = {
+                                            moreOpen = false
+                                            val dest = one.parentFile ?: current
+                                            runOp("Extraído") {
+                                                Archives.extract(one, dest).exceptionOrNull()
+                                                    ?.let { listOf(it.message ?: "Erro ao extrair") }
+                                                    ?: emptyList()
+                                            }
+                                        }
+                                    )
+                                }
+                                val allHidden = files.all { it.name.startsWith(".") }
+                                DropdownMenuItem(
+                                    text = { Text(if (allHidden) "Mostrar" else "Ocultar") },
+                                    onClick = {
+                                        moreOpen = false
+                                        runOp(
+                                            if (allHidden) "Itens visíveis"
+                                            else "Ocultado. Para ver, ative Mostrar arquivos ocultos"
+                                        ) {
+                                            files.mapNotNull { f ->
+                                                val newName = if (allHidden) f.name.trimStart('.') else "." + f.name
+                                                FileOps.rename(f, newName).exceptionOrNull()
+                                                    ?.let { "${f.name}: ${it.message}" }
+                                            }
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Copiar para...") },
+                                    onClick = {
+                                        moreOpen = false
+                                        dialog = DialogState.CopyMoveTo(files, move = false)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Mover para...") },
+                                    onClick = {
+                                        moreOpen = false
+                                        dialog = DialogState.CopyMoveTo(files, move = true)
+                                    }
+                                )
+                                if (one != null && one.isDirectory) {
+                                    DropdownMenuItem(
+                                        text = { Text("Mover conteúdo para cima") },
+                                        onClick = {
+                                            moreOpen = false
+                                            dialog = DialogState.MoveUp(one)
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 )
@@ -376,75 +581,7 @@ private fun BrowserContent(
         bottomBar = {
             val cb = clipboard
             if (selected.isNotEmpty()) {
-                val files = entries.filter { it.absolutePath in selected }
-                BottomAppBar {
-                    TextButton(onClick = {
-                        clipboard = Clipboard(files.map { it.absolutePath }, move = false)
-                        selected = emptySet()
-                    }) { Text("Copiar") }
-                    TextButton(onClick = {
-                        clipboard = Clipboard(files.map { it.absolutePath }, move = true)
-                        selected = emptySet()
-                    }) { Text("Mover") }
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { dialog = DialogState.Delete(files) }) { Text("Excluir") }
-                    Box {
-                        TextButton(onClick = { moreOpen = true }) { Text("⋮") }
-                        DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
-                            if (files.size == 1) {
-                                DropdownMenuItem(
-                                    text = { Text("Renomear") },
-                                    onClick = {
-                                        moreOpen = false
-                                        dialog = DialogState.Rename(files.first())
-                                    }
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Detalhes") },
-                                onClick = {
-                                    moreOpen = false
-                                    dialog = DialogState.Details(files)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Compactar...") },
-                                onClick = {
-                                    moreOpen = false
-                                    dialog = DialogState.Compress(files)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Compartilhar") },
-                                onClick = {
-                                    moreOpen = false
-                                    if (files.any { it.isDirectory }) {
-                                        say("Pastas não podem ser compartilhadas. Compacte em ZIP primeiro.")
-                                    } else {
-                                        FileOpener.share(context, files)
-                                        selected = emptySet()
-                                    }
-                                }
-                            )
-                            val zipFile = files.singleOrNull()
-                                ?.takeIf { Archives.isArchive(it) }
-                            if (zipFile != null) {
-                                DropdownMenuItem(
-                                    text = { Text("Extrair aqui") },
-                                    onClick = {
-                                        moreOpen = false
-                                        val dest = zipFile.parentFile ?: current
-                                        runOp("Extraído") {
-                                            Archives.extract(zipFile, dest).exceptionOrNull()
-                                                ?.let { listOf(it.message ?: "Erro ao extrair") }
-                                                ?: emptyList()
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
+                // As ações da seleção ficam na barra do topo
             } else if (cb != null) {
                 BottomAppBar {
                     Text(
@@ -687,6 +824,48 @@ private fun BrowserContent(
                     }
                 },
                 onDismiss = { dialog = null }
+            )
+        }
+        is DialogState.CopyMoveTo -> {
+            val items = d.files
+            val move = d.move
+            FolderPickerDialog(
+                title = if (move) "Mover para..." else "Copiar para...",
+                root = root,
+                start = current,
+                confirmLabel = if (move) "Mover aqui" else "Copiar aqui",
+                onDismiss = { dialog = null },
+                onPick = { dest ->
+                    dialog = null
+                    runOp(if (move) "Movido" else "Copiado") {
+                        items.mapNotNull { f ->
+                            val r = if (move) FileOps.move(f, dest) else FileOps.copy(f, dest)
+                            r.exceptionOrNull()?.let { "${f.name}: ${it.message}" }
+                        }
+                    }
+                }
+            )
+        }
+        is DialogState.Metadata -> MetadataDialog(file = d.file, onDismiss = { dialog = null })
+        is DialogState.MoveUp -> {
+            val dir = d.dir
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                title = { Text("Mover conteúdo para cima?") },
+                text = {
+                    Text("Os itens de \"${dir.name}\" vão para a pasta acima e a pasta, se ficar vazia, é removida.")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        dialog = null
+                        runOp("Conteúdo movido") {
+                            FileOps.moveContentUp(dir).exceptionOrNull()
+                                ?.let { listOf(it.message ?: "Erro ao mover o conteúdo") }
+                                ?: emptyList()
+                        }
+                    }) { Text("Mover") }
+                },
+                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancelar") } }
             )
         }
         is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
@@ -932,3 +1111,7 @@ fun PermissionScreen(onRequest: () -> Unit) {
         }
     }
 }
+
+/** Agrupa por tipo para "Mesmo tipo": pasta, uma das categorias ou "outros". */
+private fun typeKey(file: File): String =
+    if (file.isDirectory) "dir" else (categoryOf(file)?.name ?: "other")

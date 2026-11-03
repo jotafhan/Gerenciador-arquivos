@@ -99,6 +99,19 @@ object FileOps {
         target
     }
 
+    /** Move tudo que está dentro de [dir] para a pasta acima e remove [dir] se ficar vazia. */
+    fun moveContentUp(dir: File): Result<Unit> = runCatching {
+        val parent = dir.parentFile ?: error("Esta pasta não tem uma pasta acima")
+        val children = dir.listFiles() ?: error("Sem acesso a esta pasta")
+        val errors = ArrayList<String>()
+        for (child in children) {
+            move(child, parent).onFailure { errors.add("${child.name}: ${it.message}") }
+        }
+        if (errors.isNotEmpty()) error(errors.first())
+        if (dir.listFiles().isNullOrEmpty()) dir.delete()
+        Unit
+    }
+
     fun createFolder(parent: File, name: String): Result<File> = runCatching {
         val clean = name.trim()
         require(clean.isNotEmpty()) { "O nome não pode ficar vazio" }
