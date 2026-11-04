@@ -56,6 +56,7 @@ const val TOOL_TRASH = "TRASH"
 const val TOOL_SPACE = "SPACE"
 const val TOOL_DUPLICATES = "DUPLICATES"
 const val TOOL_APPS = "APPS"
+const val TOOL_FAVORITES = "FAVORITES"
 
 private fun fmt(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
@@ -67,6 +68,7 @@ fun ToolHost(tool: String, storage: File, onClose: () -> Unit, onShowInFolder: (
         TOOL_SPACE -> SpaceScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
         TOOL_DUPLICATES -> DuplicatesScreen(storage = storage, onClose = onClose)
         TOOL_APPS -> AppsScreen(storage = storage, onClose = onClose)
+        TOOL_FAVORITES -> FavoritesScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
         else -> {
             val cat = Category.entries.firstOrNull { it.name == tool }
             if (cat != null) {

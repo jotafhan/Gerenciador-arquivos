@@ -77,7 +77,7 @@ private class HomeItem(val icon: String, val label: String, val color: Color, va
 
 private fun humanSize(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
-private fun colorFor(cat: Category): Color = when (cat) {
+internal fun colorFor(cat: Category): Color = when (cat) {
     Category.IMAGES -> Color(0xFF00838F)
     Category.VIDEOS -> Color(0xFFC62828)
     Category.AUDIO -> Color(0xFFF57C00)
@@ -137,6 +137,7 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
     val mediaItems = Category.entries.filter { it != Category.APKS }.map { cat ->
         HomeItem(cat.icon, cat.label, colorFor(cat)) { onOpenTool(cat.name) }
     }
+    val mediaAll = mediaItems + HomeItem("⭐", "Favoritos", Color(0xFF1E88E5)) { onOpenTool(TOOL_FAVORITES) }
     val appItems = listOf(
         HomeItem("📲", "Aplicativos", Color(0xFF5C6BC0)) { onOpenTool(TOOL_APPS) },
         HomeItem(Category.APKS.icon, Category.APKS.label, colorFor(Category.APKS)) { onOpenTool(Category.APKS.name) }
@@ -158,6 +159,7 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         go { onOpenFolder(storage) }
                     }
                     DrawerSection("BIBLIOTECA")
+                    DrawerEntry("⭐", "Favoritos", null, false) { go { onOpenTool(TOOL_FAVORITES) } }
                     Category.entries.filter { it != Category.APKS }.forEach { cat ->
                         val bytes = report?.byCategory?.firstOrNull { it.first == cat.label }?.second
                         DrawerEntry(cat.icon, cat.label, bytes?.let { humanSize(context, it) }, false) {
@@ -237,7 +239,7 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                 item { SectionHeader("FERRAMENTAS") }
                 item { ButtonGrid(tools) }
                 item { SectionHeader("MÍDIA") }
-                item { ButtonGrid(mediaItems) }
+                item { ButtonGrid(mediaAll) }
                 item { SectionHeader("APPS") }
                 item { ButtonGrid(appItems) }
                 item {

@@ -112,6 +112,16 @@ object FileOps {
         Unit
     }
 
+    fun createFile(parent: File, name: String): Result<File> = runCatching {
+        val clean = name.trim()
+        require(clean.isNotEmpty()) { "O nome não pode ficar vazio" }
+        require('/' !in clean) { "O nome não pode ter /" }
+        val target = File(parent, clean)
+        if (target.exists()) error("Já existe um item com esse nome")
+        if (!target.createNewFile()) error("Não foi possível criar o arquivo")
+        target
+    }
+
     fun createFolder(parent: File, name: String): Result<File> = runCatching {
         val clean = name.trim()
         require(clean.isNotEmpty()) { "O nome não pode ficar vazio" }

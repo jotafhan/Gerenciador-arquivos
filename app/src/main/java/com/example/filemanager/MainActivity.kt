@@ -34,6 +34,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hasAccess.value = checkAccess()
+        Favorites.init(applicationContext)
+        handleLaunchIntent(intent)
 
         setContent {
             val dark = isSystemInDarkTheme()
@@ -54,6 +56,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunchIntent(intent)
+    }
+
+    /** Atalhos criados pelo app trazem a pasta a abrir em "open_path". */
+    private fun handleLaunchIntent(intent: Intent?) {
+        intent?.getStringExtra("open_path")?.let { LaunchRequest.path = it }
     }
 
     override fun onResume() {

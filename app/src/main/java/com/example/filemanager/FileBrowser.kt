@@ -1,5 +1,6 @@
 package com.example.filemanager
 
+import android.content.Context
 import android.os.Environment
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
@@ -19,6 +20,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
@@ -58,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -78,6 +83,8 @@ private sealed interface DialogState {
     data class CopyMoveTo(val files: List<File>, val move: Boolean) : DialogState
     data class Metadata(val file: File) : DialogState
     data class MoveUp(val dir: File) : DialogState
+    data object NewFile : DialogState
+    data class AddTo(val files: List<File>) : DialogState
 }
 
 /** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
@@ -92,6 +99,19 @@ fun FileBrowserScreen() {
     fun closeTool() {
         tool = ""
         toolChanges++
+    }
+
+    // Abre a pasta pedida por um atalho da tela inicial do Android
+    val launchPath = LaunchRequest.path
+    LaunchedEffect(launchPath) {
+        if (launchPath != null) {
+            val target = File(launchPath)
+            val dir = if (target.isDirectory) target else target.parentFile
+            if (dir != null) jumpTo = dir.absolutePath
+            home = false
+            tool = ""
+            LaunchRequest.path = null
+        }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -175,8 +195,16 @@ private fun BrowserContent(
     val snackbar = remember { SnackbarHostState() }
     val focusRequester = remember { FocusRequester() }
     val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
+    val prefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
+    var gridMode by remember { mutableStateOf(prefs.getBoolean("grid_mode", false)) }
+    var newMenuOpen by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
     // Ao mudar a ordenação (ou de pasta), volta ao primeiro item da lista
-    LaunchedEffect(currentPath, sortName, ascending) { listState.scrollToItem(0) }
+    LaunchedEffect(currentPath, sortName, ascending) {
+        listState.scrollToItem(0)
+        gridState.scrollToItem(0)
+    }
 
     val current = File(currentPath)
     val sortKey = SortKey.valueOf(sortName)
@@ -430,6 +458,27 @@ private fun BrowserContent(
                                         )
                                     }
                                 }
+                                val allFavorite = files.all { it.absolutePath in Favorites.items }
+                                DropdownMenuItem(
+                                    text = { Text(if (allFavorite) "Desafixar" else "Fixar") },
+                                    onClick = {
+                                        moreOpen = false
+                                        if (allFavorite) {
+                                            Favorites.remove(context, files)
+                                            say("Removido dos favoritos")
+                                        } else {
+                                            Favorites.add(context, files)
+                                            say("Fixado nos favoritos")
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Adicionar a...") },
+                                    onClick = {
+                                        moreOpen = false
+                                        dialog = DialogState.AddTo(files)
+                                    }
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Compactar...") },
                                     onClick = {
@@ -605,6 +654,67 @@ private fun BrowserContent(
                         }
                     ) { Text("Colar aqui") }
                 }
+            } else {
+                BottomAppBar {
+                    IconButton(onClick = { searching = true }, modifier = Modifier.weight(1f)) {
+                        Text("🔍", fontSize = 20.sp)
+                    }
+                    IconButton(
+                        onClick = {
+                            gridMode = !gridMode
+                            prefs.edit().putBoolean("grid_mode", gridMode).apply()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text(if (gridMode) "☰" else "▦", fontSize = 20.sp) }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        IconButton(onClick = { newMenuOpen = true }) { Text("➕", fontSize = 20.sp) }
+                        DropdownMenu(expanded = newMenuOpen, onDismissRequest = { newMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Nova pasta") },
+                                onClick = {
+                                    newMenuOpen = false
+                                    dialog = DialogState.NewFolder
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Novo arquivo") },
+                                onClick = {
+                                    newMenuOpen = false
+                                    dialog = DialogState.NewFile
+                                }
+                            )
+                        }
+                    }
+                    IconButton(onClick = { refreshKey++ }, modifier = Modifier.weight(1f)) {
+                        Text("🔄", fontSize = 20.sp)
+                    }
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        IconButton(onClick = { sortMenuOpen = true }) { Text("↕️", fontSize = 20.sp) }
+                        DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                            SortKey.entries.forEach { key ->
+                                val arrow = if (key == sortKey) {
+                                    if (ascending) " ↑" else " ↓"
+                                } else ""
+                                DropdownMenuItem(
+                                    text = { Text("Ordenar por ${key.label}$arrow") },
+                                    onClick = {
+                                        sortMenuOpen = false
+                                        if (key == sortKey) {
+                                            ascending = !ascending
+                                        } else {
+                                            sortName = key.name
+                                            ascending = key == SortKey.NAME
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    IconButton(
+                        onClick = { selected = entries.map { it.absolutePath }.toSet() },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("☑", fontSize = 20.sp) }
+                }
             }
         }
     ) { padding ->
@@ -666,6 +776,46 @@ private fun BrowserContent(
             if (message != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(message) }
             } else {
+                if (gridMode) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(96.dp),
+                        state = gridState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(6.dp)
+                    ) {
+                        items(entries, key = { it.absolutePath }) { file ->
+                            FileCell(
+                                file = file,
+                                folderSize = if (file.isDirectory) folderSizes[file.absolutePath] else null,
+                                selectionMode = selected.isNotEmpty(),
+                                isSelected = file.absolutePath in selected,
+                                onClick = {
+                                    when {
+                                        selected.isNotEmpty() -> {
+                                            selected = if (file.absolutePath in selected) {
+                                                selected - file.absolutePath
+                                            } else {
+                                                selected + file.absolutePath
+                                            }
+                                        }
+                                        file.isDirectory -> navigateTo(file)
+                                        Archives.isArchive(file) -> {
+                                            dialog = DialogState.ZipChoice(file)
+                                        }
+                                        else -> FileOpener.open(context, file)
+                                    }
+                                },
+                                onLongClick = {
+                                    selected = if (file.absolutePath in selected) {
+                                        selected - file.absolutePath
+                                    } else {
+                                        selected + file.absolutePath
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } else {
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(entries, key = { it.absolutePath }) { file ->
                         FileRow(
@@ -700,6 +850,7 @@ private fun BrowserContent(
                         )
                         HorizontalDivider()
                     }
+                }
                 }
             }
         }
@@ -866,6 +1017,44 @@ private fun BrowserContent(
                     }) { Text("Mover") }
                 },
                 dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancelar") } }
+            )
+        }
+        is DialogState.NewFile -> TextInputDialog(
+            title = "Novo arquivo",
+            label = "Nome (ex.: nota.txt)",
+            initial = "",
+            confirmLabel = "Criar",
+            onDismiss = { dialog = null },
+            onConfirm = { name ->
+                dialog = null
+                val dest = current
+                runOp("Arquivo criado") {
+                    FileOps.createFile(dest, name).exceptionOrNull()
+                        ?.let { listOf(it.message ?: "Erro ao criar o arquivo") }
+                        ?: emptyList()
+                }
+            }
+        )
+        is DialogState.AddTo -> {
+            val items = d.files
+            ActionsDialog(
+                title = "Adicionar a...",
+                info = "${items.size} item(ns)",
+                actions = listOf(
+                    Act("Favoritos") {
+                        Favorites.add(context, items)
+                        say("Adicionado aos favoritos")
+                        selected = emptySet()
+                    },
+                    Act("Atalho na tela inicial do Android") {
+                        if (items.size == 1) {
+                            say(Favorites.pinShortcut(context, items.first()))
+                        } else {
+                            say("Para criar um atalho, selecione um item só")
+                        }
+                    }
+                ),
+                onDismiss = { dialog = null }
             )
         }
         is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
@@ -1085,7 +1274,7 @@ internal fun FileRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (selectionMode) Checkbox(checked = isSelected, onCheckedChange = null)
-        Text(iconFor(file), style = MaterialTheme.typography.titleLarge)
+        FileIcon(file, 44.dp)
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = file.name,
