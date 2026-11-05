@@ -115,13 +115,6 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
             stat.totalBytes to stat.availableBytes
         }.getOrDefault(0L to 0L)
     }
-    val (ramTotal, ramFree) = remember(refresh) {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val info = ActivityManager.MemoryInfo()
-        am.getMemoryInfo(info)
-        info.totalMem to info.availMem
-    }
-
     fun go(action: () -> Unit) {
         scope.launch { drawerState.close() }
         action()
@@ -177,7 +170,7 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         false
                     ) { go { onOpenTool(Category.APKS.name) } }
                     DrawerSection("FERRAMENTAS")
-                    DrawerEntry("📊", "Analisar espaço", null, false) { go { onOpenTool(TOOL_SPACE) } }
+                    DrawerEntry("📊", "Analisar armazenamento", null, false) { go { onOpenTool(TOOL_SPACE) } }
                     DrawerEntry("👯", "Achar duplicados", null, false) { go { onOpenTool(TOOL_DUPLICATES) } }
                     Spacer(Modifier.height(24.dp))
                 }
@@ -219,21 +212,17 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         title = "Armazenamento interno",
                         subtitle = "${humanSize(context, free)} livre",
                         fraction = if (total > 0) used.toFloat() / total else 0f,
-                        trailing = "📊",
+                        trailing = null,
                         onClick = { onOpenFolder(storage) },
-                        onTrailingClick = { onOpenTool(TOOL_SPACE) }
+                        onTrailingClick = null
                     )
                 }
                 item {
-                    val used = (ramTotal - ramFree).coerceAtLeast(0L)
-                    InfoCard(
-                        icon = "🧠",
-                        title = "Memória",
-                        subtitle = "${humanSize(context, ramFree)} livre",
-                        fraction = if (ramTotal > 0) used.toFloat() / ramTotal else 0f,
-                        trailing = null,
-                        onClick = null,
-                        onTrailingClick = null
+                    ActionCard(
+                        icon = "📊",
+                        title = "Analisar armazenamento",
+                        subtitle = "Tipos, maiores pastas e maiores arquivos",
+                        onClick = { onOpenTool(TOOL_SPACE) }
                     )
                 }
                 item { SectionHeader("FERRAMENTAS") }
@@ -418,5 +407,35 @@ private fun CollapsibleHeader(text: String, expanded: Boolean, onToggle: () -> U
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun ActionCard(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(28.dp)
+    Surface(
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .fillMaxWidth()
+            .clip(shape)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text(icon, style = MaterialTheme.typography.headlineSmall)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

@@ -1,34 +1,90 @@
 package com.example.filemanager
 
 import com.github.junrar.Archive
+import net.lingala.zip4j.ZipFile
+import net.lingala.zip4j.exception.ZipException
+import net.lingala.zip4j.model.ZipParameters
+import net.lingala.zip4j.model.enums.AesKeyStrength
+import net.lingala.zip4j.model.enums.CompressionLevel
+import net.lingala.zip4j.model.enums.CompressionMethod
+import net.lingala.zip4j.model.enums.EncryptionMethod
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import org.apache.commons.compress.archivers.sevenz.SevenZMethod
+import org.apache.commons.compress.archivers.sevenz.SevenZMethodConfiguration
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
+import org.apache.commons.compress.compressors.gzip.GzipParameters
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
+import org.tukaani.xz.LZMA2Options
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.util.Date
 
-enum class ArchiveFormat(val label: String) {
-    ZIP("ZIP"),
+// ------------------------------------------------------------------ Opções de compactação
+
+enum class ArchiveFormat(val ext: String) {
+    ZIP("zip"),
     SEVEN_Z("7z"),
-    TAR_GZ("TAR.GZ")
+    TAR("tar"),
+    TAR_GZ("tar.gz"),
+    TAR_BZ2("tar.bz2"),
+    TAR_XZ("tar.xz")
 }
+
+enum class LevelOption(val label: String) {
+    STORE("Sem compressão"),
+    FAST("Rápido"),
+    NORMAL("Normal"),
+    MAX("Máximo")
+}
+
+enum class EncryptionOption(val label: String) {
+    NONE("Nenhuma"),
+    ZIP_CRYPTO("Dados (ZipCrypto, fraca)"),
+    AES256("AES-256")
+}
+
+enum class SplitOption(val label: String, val bytes: Long?) {
+    NONE("Não", null),
+    MB10("10 MB", 10L * 1024 * 1024),
+    MB50("50 MB", 50L * 1024 * 1024),
+    MB100("100 MB", 100L * 1024 * 1024),
+    MB650("650 MB", 650L * 1024 * 1024),
+    GB1("1 GB", 1024L * 1024 * 1024),
+    GB2("2 GB", 2048L * 1024 * 1024)
+}
+
+data class CompressOptions(
+    val format: ArchiveFormat,
+    val level: LevelOption,
+    val encryption: EncryptionOption,
+    val password: String,
+    val splitBytes: Long?,
+    val separate: Boolean,
+    val deleteAfter: Boolean
+)
+
+/** O arquivo está protegido por senha (ou a senha digitada estava errada). */
+class PasswordRequiredException(val wrong: Boolean) :
+    Exception(if (wrong) "Senha incorreta" else "Este arquivo está protegido por senha")
 
 /**
  * Compactar e extrair vários formatos.
- * Extrai: ZIP, 7z, RAR (só RAR4), TAR, TAR.GZ/TGZ, TAR.BZ2, TAR.XZ, GZ, BZ2, XZ.
- * Compacta: ZIP, 7z, TAR.GZ.
+ * Extrai: ZIP (inclusive com senha e em volumes), 7z, RAR (só RAR4), TAR, TAR.GZ/TGZ, TAR.BZ2, TAR.XZ, GZ, BZ2, XZ.
+ * Compacta: ZIP (com senha e volumes), 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ.
  */
 object Archives {
 
@@ -51,11 +107,48 @@ object Archives {
         return base.ifEmpty { "extraido" }
     }
 
+    private fun uniqueTarget(dir: File, base: String, ext: String): File {
+        var target = File(dir, "$base.$ext")
+        var i = 1
+        while (target.exists()) {
+            target = File(dir, "$base ($i).$ext")
+            i++
+        }
+        return target
+    }
+
     // ------------------------------------------------------------ Extrair
 
-    fun extract(archive: File, destDir: File): Result<File> = runCatching {
+    private fun isZipEncrypted(file: File): Boolean =
+        runCatching { ZipFile(file).isEncrypted }.getOrDefault(false)
+
+    private fun hasSplitParts(zip: File): Boolean =
+        File(zip.parentFile, zip.name.dropLast(4) + ".z01").exists()
+
+    fun extract(archive: File, destDir: File, password: String? = null): Result<File> = runCatching {
         val lower = archive.name.lowercase()
-        if (lower.endsWith(".zip")) return@runCatching Zip.extract(archive, destDir).getOrThrow()
+
+        if (lower.endsWith(".zip")) {
+            val encrypted = isZipEncrypted(archive)
+            if (!encrypted && password == null && !hasSplitParts(archive)) {
+                return@runCatching Zip.extract(archive, destDir).getOrThrow()
+            }
+            if (encrypted && password.isNullOrEmpty()) throw PasswordRequiredException(false)
+            val target = FileOps.uniqueTarget(destDir, baseNameOf(archive))
+            if (!target.mkdirs()) error("Não foi possível criar a pasta de destino")
+            try {
+                val zip = if (password.isNullOrEmpty()) ZipFile(archive) else ZipFile(archive, password.toCharArray())
+                zip.use { it.extractAll(target.absolutePath) }
+            } catch (e: ZipException) {
+                target.deleteRecursively()
+                if (e.type == ZipException.Type.WRONG_PASSWORD) throw PasswordRequiredException(true)
+                throw e
+            } catch (e: Exception) {
+                target.deleteRecursively()
+                throw e
+            }
+            return@runCatching target
+        }
 
         val target = FileOps.uniqueTarget(destDir, baseNameOf(archive))
         if (!target.mkdirs()) error("Não foi possível criar a pasta de destino")
@@ -88,7 +181,7 @@ object Archives {
             kind.contains("V5") ->
                 IllegalStateException("RAR5 ainda não é suportado (só RAR4). Extraia no computador.")
             kind.contains("Encrypted") || e.message?.contains("password", ignoreCase = true) == true ->
-                IllegalStateException("Arquivo protegido por senha (não suportado)")
+                IllegalStateException("Arquivo protegido por senha (só ZIP com senha é suportado)")
             else -> e
         }
     }
@@ -178,42 +271,122 @@ object Archives {
 
     // ------------------------------------------------------------ Compactar
 
-    fun compress(files: List<File>, destDir: File, format: ArchiveFormat): Result<File> = when (format) {
-        ArchiveFormat.ZIP -> Zip.compress(files, destDir)
-        ArchiveFormat.SEVEN_Z -> pack(files, destDir, "7z") { f, t -> write7z(f, t) }
-        ArchiveFormat.TAR_GZ -> pack(files, destDir, "tar.gz") { f, t -> writeTarGz(f, t) }
-    }
-
-    private fun pack(
+    /** Cria o(s) arquivo(s) compactado(s) em [destDir]. Devolve os arquivos criados. */
+    fun compress(
         files: List<File>,
         destDir: File,
-        ext: String,
-        writer: (List<File>, File) -> Unit
-    ): Result<File> = runCatching {
+        baseName: String,
+        options: CompressOptions
+    ): Result<List<File>> = runCatching {
         require(files.isNotEmpty()) { "Nada para compactar" }
-        val first = files.first()
-        val base = if (files.size == 1) {
-            if (first.isDirectory) first.name else first.nameWithoutExtension
-        } else {
-            "Arquivos"
+        val groups = if (options.separate && files.size > 1) files.map { listOf(it) } else listOf(files)
+        val created = ArrayList<File>()
+        for (group in groups) {
+            val first = group.first()
+            val name = if (groups.size > 1) {
+                if (first.isDirectory) first.name else first.nameWithoutExtension
+            } else {
+                baseName
+            }
+            val target = uniqueTarget(destDir, name.ifBlank { "Arquivos" }, options.format.ext)
+            try {
+                write(group, target, options)
+            } catch (e: Exception) {
+                cleanup(target, options)
+                throw e
+            }
+            created.add(target)
         }
-        var target = File(destDir, "$base.$ext")
-        var i = 1
-        while (target.exists()) {
-            target = File(destDir, "$base ($i).$ext")
-            i++
-        }
-        try {
-            writer(files, target)
-        } catch (e: Exception) {
-            target.delete()
-            throw e
-        }
-        target
+        created
     }
 
-    private fun write7z(files: List<File>, target: File) {
+    /** Remove o arquivo (e os volumes .z01, .z02...) de uma compactação que falhou. */
+    private fun cleanup(target: File, options: CompressOptions) {
+        target.delete()
+        if (options.format == ArchiveFormat.ZIP) {
+            val stem = target.name.removeSuffix(".zip")
+            target.parentFile?.listFiles()
+                ?.filter { Regex("""\.z\d+$""").containsMatchIn(it.name) && it.name.startsWith("$stem.z") }
+                ?.forEach { it.delete() }
+        }
+    }
+
+    private fun gzLevel(l: LevelOption) = when (l) {
+        LevelOption.STORE -> 0
+        LevelOption.FAST -> 1
+        LevelOption.NORMAL -> 6
+        LevelOption.MAX -> 9
+    }
+
+    private fun bzBlock(l: LevelOption) = when (l) {
+        LevelOption.STORE, LevelOption.FAST -> 1
+        LevelOption.NORMAL -> 5
+        LevelOption.MAX -> 9
+    }
+
+    // Presets baixos para não estourar a memória do celular (o 6 usa ~94 MB)
+    private fun xzPreset(l: LevelOption) = when (l) {
+        LevelOption.STORE, LevelOption.FAST -> 1
+        LevelOption.NORMAL -> 4
+        LevelOption.MAX -> 6
+    }
+
+    private fun write(files: List<File>, target: File, o: CompressOptions) {
+        when (o.format) {
+            ArchiveFormat.ZIP -> writeZip(files, target, o)
+            ArchiveFormat.SEVEN_Z -> write7z(files, target, o.level)
+            ArchiveFormat.TAR -> writeTar(files, target) { it }
+            ArchiveFormat.TAR_GZ -> writeTar(files, target) {
+                GzipCompressorOutputStream(it, GzipParameters().apply { compressionLevel = gzLevel(o.level) })
+            }
+            ArchiveFormat.TAR_BZ2 -> writeTar(files, target) { BZip2CompressorOutputStream(it, bzBlock(o.level)) }
+            ArchiveFormat.TAR_XZ -> writeTar(files, target) { XZCompressorOutputStream(it, xzPreset(o.level)) }
+        }
+    }
+
+    private fun writeZip(files: List<File>, target: File, o: CompressOptions) {
+        val params = ZipParameters()
+        if (o.level == LevelOption.STORE) {
+            params.compressionMethod = CompressionMethod.STORE
+        } else {
+            params.compressionLevel = when (o.level) {
+                LevelOption.FAST -> CompressionLevel.FAST
+                LevelOption.MAX -> CompressionLevel.MAXIMUM
+                else -> CompressionLevel.NORMAL
+            }
+        }
+        val encrypt = o.encryption != EncryptionOption.NONE && o.password.isNotEmpty()
+        if (encrypt) {
+            params.isEncryptFiles = true
+            if (o.encryption == EncryptionOption.AES256) {
+                params.encryptionMethod = EncryptionMethod.AES
+                params.aesKeyStrength = AesKeyStrength.KEY_STRENGTH_256
+            } else {
+                params.encryptionMethod = EncryptionMethod.ZIP_STANDARD
+            }
+        }
+        val zip = if (encrypt) ZipFile(target, o.password.toCharArray()) else ZipFile(target)
+        zip.use { z ->
+            val split = o.splitBytes
+            if (split != null) {
+                z.createSplitZipFile(files, params, true, split)
+            } else {
+                for (f in files) {
+                    if (f.isDirectory) z.addFolder(f, params) else z.addFile(f, params)
+                }
+            }
+        }
+    }
+
+    private fun write7z(files: List<File>, target: File, level: LevelOption) {
         SevenZOutputFile(target).use { out ->
+            if (level == LevelOption.STORE) {
+                out.setContentCompression(SevenZMethod.COPY)
+            } else {
+                out.setContentMethods(
+                    listOf(SevenZMethodConfiguration(SevenZMethod.LZMA2, LZMA2Options(xzPreset(level))))
+                )
+            }
             val buf = ByteArray(64 * 1024)
             fun add(file: File, path: String) {
                 val isDir = file.isDirectory
@@ -243,9 +416,9 @@ object Archives {
         }
     }
 
-    private fun writeTarGz(files: List<File>, target: File) {
-        val gz = GzipCompressorOutputStream(BufferedOutputStream(FileOutputStream(target)))
-        TarArchiveOutputStream(gz).use { tos ->
+    private fun writeTar(files: List<File>, target: File, wrap: (OutputStream) -> OutputStream) {
+        val raw = BufferedOutputStream(FileOutputStream(target))
+        TarArchiveOutputStream(wrap(raw)).use { tos ->
             tos.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
             tos.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
             fun add(file: File, path: String) {

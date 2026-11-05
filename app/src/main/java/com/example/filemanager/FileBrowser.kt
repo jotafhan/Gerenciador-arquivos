@@ -86,6 +86,7 @@ private sealed interface DialogState {
     data class MoveUp(val dir: File) : DialogState
     data object NewFile : DialogState
     data class AddTo(val files: List<File>) : DialogState
+    data class ExtractPassword(val file: File, val dest: File, val wrong: Boolean) : DialogState
 }
 
 /** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
@@ -310,6 +311,24 @@ private fun BrowserContent(
         }
     }
 
+    /** Extrai um arquivo compactado; se pedir senha, abre o diálogo de senha. */
+    fun extractArchive(file: File, dest: File, password: String?) {
+        scope.launch {
+            busy = true
+            val result = withContext(Dispatchers.IO) { Archives.extract(file, dest, password) }
+            busy = false
+            selected = emptySet()
+            refreshKey++
+            val error = result.exceptionOrNull()
+            if (error is PasswordRequiredException) {
+                dialog = DialogState.ExtractPassword(file, dest, error.wrong)
+            } else {
+                snackbar.currentSnackbarData?.dismiss()
+                snackbar.showSnackbar(if (error == null) "Extraído" else (error.message ?: "Erro ao extrair"))
+            }
+        }
+    }
+
     BackHandler(enabled = active && selected.isNotEmpty()) { selected = emptySet() }
     BackHandler(enabled = active && selected.isEmpty() && searching) {
         searching = false
@@ -493,11 +512,7 @@ private fun BrowserContent(
                                         onClick = {
                                             moreOpen = false
                                             val dest = one.parentFile ?: current
-                                            runOp("Extraído") {
-                                                Archives.extract(one, dest).exceptionOrNull()
-                                                    ?.let { listOf(it.message ?: "Erro ao extrair") }
-                                                    ?: emptyList()
-                                            }
+                                            extractArchive(one, dest, null)
                                         }
                                     )
                                 }
@@ -893,46 +908,23 @@ private fun BrowserContent(
         is DialogState.Delete -> {
             val toDelete = d.files
             val allInTrash = toDelete.all { Trash.isInTrash(root, it) }
-            AlertDialog(
-                onDismissRequest = { dialog = null },
-                title = { Text("Excluir ${toDelete.size} item(ns)?") },
-                text = {
-                    Text(
-                        if (allInTrash) {
-                            "Itens que já estão na lixeira são apagados de forma permanente."
-                        } else {
-                            "Na lixeira você pode restaurar depois. \"Excluir de vez\" apaga permanentemente."
-                        }
-                    )
-                },
-                confirmButton = {
-                    Row {
-                        TextButton(onClick = {
-                            dialog = null
-                            runOp("Excluído de vez") {
-                                toDelete.mapNotNull { f ->
-                                    if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
-                                }
+            DeleteDialog(
+                files = toDelete,
+                allInTrash = allInTrash,
+                onDismiss = { dialog = null },
+                onConfirm = { toTrash ->
+                    dialog = null
+                    runOp(if (toTrash) "Movido para a lixeira" else "Excluído de vez") {
+                        toDelete.mapNotNull { f ->
+                            if (!toTrash || Trash.isInTrash(root, f)) {
+                                if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
+                            } else {
+                                Trash.moveToTrash(root, f).exceptionOrNull()
+                                    ?.let { "${f.name}: ${it.message}" }
                             }
-                        }) { Text("Excluir de vez") }
-                        if (!allInTrash) {
-                            TextButton(onClick = {
-                                dialog = null
-                                runOp("Movido para a lixeira") {
-                                    toDelete.mapNotNull { f ->
-                                        if (Trash.isInTrash(root, f)) {
-                                            if (f.deleteRecursively()) null else "Não foi possível excluir ${f.name}"
-                                        } else {
-                                            Trash.moveToTrash(root, f).exceptionOrNull()
-                                                ?.let { "${f.name}: ${it.message}" }
-                                        }
-                                    }
-                                }
-                            }) { Text("Lixeira") }
                         }
                     }
-                },
-                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancelar") } }
+                }
             )
         }
         is DialogState.ZipChoice -> {
@@ -945,11 +937,7 @@ private fun BrowserContent(
                     TextButton(onClick = {
                         dialog = null
                         val dest = zipFile.parentFile ?: current
-                        runOp("Extraído") {
-                            Archives.extract(zipFile, dest).exceptionOrNull()
-                                ?.let { listOf(it.message ?: "Erro ao extrair") }
-                                ?: emptyList()
-                        }
+                        extractArchive(zipFile, dest, null)
                     }) { Text("Extrair aqui") }
                 },
                 dismissButton = {
@@ -962,20 +950,26 @@ private fun BrowserContent(
         }
         is DialogState.Compress -> {
             val toPack = d.files
-            val dest = current
-            ActionsDialog(
-                title = "Compactar ${toPack.size} item(ns)",
-                info = "Escolha o formato do arquivo",
-                actions = ArchiveFormat.entries.map { format ->
-                    Act(format.label) {
-                        runOp("${format.label} criado") {
-                            Archives.compress(toPack, dest, format).exceptionOrNull()
-                                ?.let { listOf(it.message ?: "Erro ao compactar") }
-                                ?: emptyList()
+            CompressDialog(
+                files = toPack,
+                root = root,
+                initialDest = current,
+                onDismiss = { dialog = null },
+                onConfirm = { dest, name, options ->
+                    dialog = null
+                    runOp("Arquivo criado") {
+                        val error = Archives.compress(toPack, dest, name, options).exceptionOrNull()
+                        if (error != null) {
+                            listOf(error.message ?: "Erro ao compactar")
+                        } else if (options.deleteAfter) {
+                            toPack.mapNotNull { f ->
+                                Trash.moveToTrash(root, f).exceptionOrNull()?.let { "${f.name}: ${it.message}" }
+                            }
+                        } else {
+                            emptyList()
                         }
                     }
-                },
-                onDismiss = { dialog = null }
+                }
             )
         }
         is DialogState.CopyMoveTo -> {
@@ -1058,6 +1052,15 @@ private fun BrowserContent(
                 onDismiss = { dialog = null }
             )
         }
+        is DialogState.ExtractPassword -> PasswordDialog(
+            title = "Arquivo protegido",
+            message = if (d.wrong) "Senha incorreta. Tente de novo." else "Digite a senha para extrair \"${d.file.name}\".",
+            onDismiss = { dialog = null },
+            onConfirm = { pwd ->
+                dialog = null
+                extractArchive(d.file, d.dest, pwd)
+            }
+        )
         is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
         null -> {}
     }

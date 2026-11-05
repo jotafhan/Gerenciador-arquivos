@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.filemanager"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.0"
+        versionCode = 11
+        versionName = "0.8.0"
     }
 
     buildTypes {
@@ -59,6 +59,8 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("org.tukaani:xz:1.10")
     implementation("com.github.junrar:junrar:7.5.5")
+    // ZIP com senha (ZipCrypto/AES) e em volumes
+    implementation("net.lingala.zip4j:zip4j:2.11.5")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)

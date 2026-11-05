@@ -1,4 +1,4 @@
-# Gerenciador de Arquivos (v0.7.0)
+# Gerenciador de Arquivos (v0.8.0)
 
 Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compose + Material 3).
 
@@ -19,6 +19,10 @@ Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compos
 **Seleção (estilo MiXplorer):** menu de seleção (Alternar, Inverter, Anterior, Próxima, Apenas arquivos, Mesma extensão, Mesmo tipo, Nenhum, Todos), total de itens e tamanho no topo, ações em ícones (excluir, copiar, recortar, renomear, informações) e menu ⋮ (compartilhar, abrir, abrir com, metadados, compactar, extrair, ocultar, copiar para, mover para, mover conteúdo para cima).
 
 **Grade e favoritos:** visualização em lista ou grade com miniaturas (fotos, vídeos, PDFs, capas de áudio, ícones de APK), barra de ações inferior (buscar, modo de exibição, novo, atualizar, ordenar, selecionar), Favoritos (Fixar/Desafixar) e atalho na tela inicial do Android.
+
+**Compactação (estilo ZArchiver):** diálogo com nome, destino, formato (zip, 7z, tar, tar.gz, tar.bz2, tar.xz), nível, criptografia e senha (ZIP), volumes (ZIP), excluir depois e arquivo separado. Extrai ZIP com senha e em volumes.
+
+**Exclusão:** diálogo de confirmação com tamanho/quantidade e caixa "Mover para a lixeira".
 
 ## Compilar na nuvem (GitHub Actions)
 1. Crie um repositório no GitHub e envie todos os arquivos desta pasta (inclusive `.github`).
