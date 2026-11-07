@@ -367,18 +367,25 @@ private fun BrowserContent(
             return
         }
         val progress = OpProgress()
-        ActiveTask.start(title, progress)
+        ActiveTask.start(context, title, progress)
         scope.launch {
             busy = true
             var wasHidden = false
             val errors = withContext(Dispatchers.IO) {
+                var result = listOf("Erro")
                 try {
-                    work(progress)
+                    result = work(progress)
                 } catch (e: OperationCancelledException) {
-                    listOf("Cancelado")
+                    result = listOf("Cancelado")
+                } catch (e: Exception) {
+                    result = listOf(e.message ?: "Erro")
                 } finally {
-                    wasHidden = ActiveTask.finish()
+                    wasHidden = ActiveTask.finish(
+                        if (result.isEmpty()) successMessage else result.first(),
+                        result.isEmpty()
+                    )
                 }
+                result
             }
             busy = false
             selected = emptySet()
@@ -397,16 +404,24 @@ private fun BrowserContent(
             return
         }
         val progress = OpProgress()
-        ActiveTask.start("Extraindo ${file.name}...", progress)
+        ActiveTask.start(context, "Extraindo ${file.name}...", progress)
         scope.launch {
             busy = true
             var wasHidden = false
             val result = withContext(Dispatchers.IO) {
-                try {
+                val r = try {
                     Archives.extract(file, dest, password, progress)
-                } finally {
-                    wasHidden = ActiveTask.finish()
+                } catch (e: Exception) {
+                    Result.failure(e)
                 }
+                val err = r.exceptionOrNull()
+                val msg = when {
+                    err == null -> "Extraído"
+                    err is PasswordRequiredException -> null
+                    else -> err.message ?: "Erro ao extrair"
+                }
+                wasHidden = ActiveTask.finish(msg, err == null)
+                r
             }
             busy = false
             selected = emptySet()

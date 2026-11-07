@@ -95,6 +95,19 @@ class OpProgress {
     @Volatile var label: String = ""
     @Volatile var cancelled: Boolean = false
 
+    val startedAt: Long = System.currentTimeMillis()
+
+    fun elapsedMs(): Long = System.currentTimeMillis() - startedAt
+
+    /** Estimativa do tempo que falta (só com o total conhecido e depois de 2 segundos). */
+    fun remainingMs(): Long? {
+        val t = total
+        val d = done
+        val elapsed = elapsedMs()
+        if (t <= 0 || d <= 0 || elapsed < 2000) return null
+        return (elapsed * ((t - d).coerceAtLeast(0L).toDouble() / d)).toLong()
+    }
+
     fun check() {
         if (cancelled) throw OperationCancelledException()
     }

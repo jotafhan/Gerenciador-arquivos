@@ -15,6 +15,10 @@
     <!-- Listar os aplicativos instalados e desinstalar -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Progresso na barra de notificações e operação em segundo plano -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- Permite instalar em TVs e aparelhos sem touchscreen -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
@@ -46,6 +50,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- Acompanha compactações/extrações longas com notificação de progresso -->
+        <service
+            android:name=".OperationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Recebe o resultado da instalação de pacotes de APKs -->
         <receiver
             android:name=".InstallResultReceiver"

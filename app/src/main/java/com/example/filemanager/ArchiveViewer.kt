@@ -108,7 +108,7 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
             scope.launch { snackbar.showSnackbar("Já existe uma operação em andamento") }
             return
         }
-        ActiveTask.start(title, progress)
+        ActiveTask.start(context, title, progress)
         scope.launch {
             val previewDir = File(
                 context.cacheDir,
@@ -116,7 +116,7 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
             )
             val usedPassword = pwd ?: password
             val result = withContext(Dispatchers.IO) {
-                try {
+                val r = try {
                 if (node == null) {
                     Archives.extract(archive, archive.parentFile ?: archive, usedPassword, progress)
                 } else {
@@ -127,9 +127,17 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
                     }
                     Archives.extractEntries(archive, dest, usedPassword, matches, progress)
                 }
-                } finally {
-                    ActiveTask.finish()
+                } catch (e: Exception) {
+                    Result.failure(e)
                 }
+                val err = r.exceptionOrNull()
+                val msg = when {
+                    err == null -> "Extraído"
+                    err is PasswordRequiredException -> null
+                    else -> err.message ?: "Erro ao extrair"
+                }
+                ActiveTask.finish(msg, err == null)
+                r
             }
             val error = result.exceptionOrNull()
             when {

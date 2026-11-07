@@ -31,6 +31,18 @@ class MainActivity : ComponentActivity() {
             hasAccess.value = checkAccess()
         }
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun askNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("ui", MODE_PRIVATE)
+        if (prefs.getBoolean("asked_notifications", false)) return
+        prefs.edit().putBoolean("asked_notifications", true).apply()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hasAccess.value = checkAccess()
@@ -74,6 +86,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // Ao voltar das configurações, confere se o acesso foi concedido
         hasAccess.value = checkAccess()
+        if (hasAccess.value) askNotificationPermissionOnce()
     }
 
     private fun checkAccess(): Boolean =

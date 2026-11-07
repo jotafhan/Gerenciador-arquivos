@@ -1,5 +1,7 @@
 package com.example.filemanager
 
+import android.content.Context
+import android.content.Intent
 import android.text.format.Formatter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -427,6 +430,20 @@ internal fun ProgressDialog(
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     if (done > 0) Text(Formatter.formatFileSize(context, done) + " processados")
                 }
+                val elapsed = progress.elapsedMs()
+                val remaining = progress.remainingMs()
+                Text(
+                    buildString {
+                        append("Decorrido: ").append(formatClock(elapsed))
+                        if (remaining != null) {
+                            append("\nRestante: ~").append(formatClock(remaining))
+                            append("\nTotal estimado: ~").append(formatClock(elapsed + remaining))
+                        } else if (total > 0) {
+                            append("\nCalculando o tempo restante...")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         },
         confirmButton = { TextButton(onClick = onCancel) { Text("Cancelar") } },
@@ -438,19 +455,45 @@ internal fun ProgressDialog(
 
 // ------------------------------------------------------------------ Operação em andamento (global)
 
+/** Formata milissegundos como m:ss (ou h:mm:ss). */
+internal fun formatClock(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0L)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
 /** A operação longa em andamento (compactar/extrair), visível em qualquer tela do app. */
 object ActiveTask {
     var current by mutableStateOf<Pair<String, OpProgress>?>(null)
     var hidden by mutableStateOf(false)
 
-    fun start(title: String, progress: OpProgress) {
+    // Resultado da última operação (lido pelo serviço para a notificação final)
+    @Volatile var lastMessage: String? = null
+    @Volatile var lastOk: Boolean = true
+    @Volatile var lastElapsedMs: Long = 0L
+
+    fun start(context: Context, title: String, progress: OpProgress) {
+        lastMessage = null
         current = title to progress
         hidden = false
+        // O serviço mostra o progresso na barra de notificações e mantém o app vivo
+        runCatching {
+            ContextCompat.startForegroundService(context, Intent(context, OperationService::class.java))
+        }
     }
 
-    /** Encerra e diz se a janela estava oculta (para avisar o fim com um Toast). */
-    fun finish(): Boolean {
+    /**
+     * Encerra a operação. [message] é o texto da notificação final (null = sem notificação).
+     * Devolve se a janela estava oculta.
+     */
+    fun finish(message: String?, ok: Boolean): Boolean {
         val wasHidden = hidden
+        val started = current?.second?.startedAt
+        lastElapsedMs = if (started != null) System.currentTimeMillis() - started else 0L
+        lastMessage = message
+        lastOk = ok
         current = null
         hidden = false
         return wasHidden
@@ -494,7 +537,11 @@ internal fun ProgressBanner(title: String, progress: OpProgress, onShow: () -> U
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        if (percent >= 0) "$percent%  •  toque para ver" else "Em andamento  •  toque para ver",
+                        buildString {
+                            append(if (percent >= 0) "$percent%" else "Em andamento")
+                            progress.remainingMs()?.let { append("  •  restam ~").append(formatClock(it)) }
+                            append("  •  toque para ver")
+                        },
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
