@@ -3,6 +3,7 @@ package com.example.filemanager
 import android.content.Context
 import android.os.Environment
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -159,6 +160,30 @@ fun FileBrowserScreen() {
                 )
             }
         }
+
+        ActiveTask.current?.let { (title, progress) ->
+            if (ActiveTask.hidden) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 96.dp)
+                ) {
+                    ProgressBanner(
+                        title = title,
+                        progress = progress,
+                        onShow = { ActiveTask.hidden = false },
+                        onCancel = { progress.cancelled = true }
+                    )
+                }
+            } else {
+                ProgressDialog(
+                    title = title,
+                    progress = progress,
+                    onCancel = { progress.cancelled = true },
+                    onHide = { ActiveTask.hidden = true }
+                )
+            }
+        }
     }
 }
 
@@ -193,7 +218,6 @@ private fun BrowserContent(
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
-    var progressTask by remember { mutableStateOf<Pair<String, OpProgress>?>(null) }
     var selectedBytes by remember { mutableStateOf<Long?>(null) }
 
     // Tamanho total dos itens selecionados (pastas incluem o conteúdo)
@@ -336,45 +360,65 @@ private fun BrowserContent(
         }
     }
 
-    /** Roda uma operação longa em segundo plano, com janela de progresso e botão de cancelar. */
+    /** Roda uma operação longa em segundo plano, com janela de progresso (que pode ser ocultada). */
     fun runArchiveOp(title: String, successMessage: String, work: (OpProgress) -> List<String>) {
+        if (ActiveTask.current != null) {
+            say("Já existe uma operação em andamento")
+            return
+        }
         val progress = OpProgress()
-        progressTask = title to progress
+        ActiveTask.start(title, progress)
         scope.launch {
             busy = true
+            var wasHidden = false
             val errors = withContext(Dispatchers.IO) {
                 try {
                     work(progress)
                 } catch (e: OperationCancelledException) {
                     listOf("Cancelado")
+                } finally {
+                    wasHidden = ActiveTask.finish()
                 }
             }
             busy = false
-            progressTask = null
             selected = emptySet()
             refreshKey++
+            val msg = if (errors.isEmpty()) successMessage else errors.first()
+            if (wasHidden) Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
             snackbar.currentSnackbarData?.dismiss()
-            snackbar.showSnackbar(if (errors.isEmpty()) successMessage else errors.first())
+            snackbar.showSnackbar(msg)
         }
     }
 
     /** Extrai um arquivo compactado; se pedir senha, abre o diálogo de senha. */
     fun extractArchive(file: File, dest: File, password: String?) {
+        if (ActiveTask.current != null) {
+            say("Já existe uma operação em andamento")
+            return
+        }
         val progress = OpProgress()
-        progressTask = "Extraindo ${file.name}..." to progress
+        ActiveTask.start("Extraindo ${file.name}...", progress)
         scope.launch {
             busy = true
-            val result = withContext(Dispatchers.IO) { Archives.extract(file, dest, password, progress) }
+            var wasHidden = false
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    Archives.extract(file, dest, password, progress)
+                } finally {
+                    wasHidden = ActiveTask.finish()
+                }
+            }
             busy = false
-            progressTask = null
             selected = emptySet()
             refreshKey++
             val error = result.exceptionOrNull()
             if (error is PasswordRequiredException) {
                 dialog = DialogState.ExtractPassword(file, dest, error.wrong)
             } else {
+                val msg = if (error == null) "Extraído" else (error.message ?: "Erro ao extrair")
+                if (wasHidden) Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 snackbar.currentSnackbarData?.dismiss()
-                snackbar.showSnackbar(if (error == null) "Extraído" else (error.message ?: "Erro ao extrair"))
+                snackbar.showSnackbar(msg)
             }
         }
     }
@@ -953,10 +997,6 @@ private fun BrowserContent(
                 }
             }
         }
-    }
-
-    progressTask?.let { (title, progress) ->
-        ProgressDialog(title = title, progress = progress, onCancel = { progress.cancelled = true })
     }
 
     when (val d = dialog) {

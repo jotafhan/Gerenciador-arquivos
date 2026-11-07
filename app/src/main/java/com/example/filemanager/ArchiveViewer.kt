@@ -64,7 +64,6 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
     var loadError by remember { mutableStateOf<String?>(null) }
     var prefix by rememberSaveable { mutableStateOf("") } // pasta atual dentro do arquivo ("" = raiz)
     var picked by remember { mutableStateOf<ViewerNode?>(null) }
-    var task by remember { mutableStateOf<Pair<String, OpProgress>?>(null) }
     var pending by remember { mutableStateOf<PendingAction?>(null) }
     var password by remember { mutableStateOf<String?>(null) }
 
@@ -105,7 +104,11 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
             openAfter -> "Abrindo ${node.name}..."
             else -> "Extraindo ${node.name}..."
         }
-        task = title to progress
+        if (ActiveTask.current != null) {
+            scope.launch { snackbar.showSnackbar("Já existe uma operação em andamento") }
+            return
+        }
+        ActiveTask.start(title, progress)
         scope.launch {
             val previewDir = File(
                 context.cacheDir,
@@ -113,6 +116,7 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
             )
             val usedPassword = pwd ?: password
             val result = withContext(Dispatchers.IO) {
+                try {
                 if (node == null) {
                     Archives.extract(archive, archive.parentFile ?: archive, usedPassword, progress)
                 } else {
@@ -123,8 +127,10 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
                     }
                     Archives.extractEntries(archive, dest, usedPassword, matches, progress)
                 }
+                } finally {
+                    ActiveTask.finish()
+                }
             }
-            task = null
             val error = result.exceptionOrNull()
             when {
                 error is PasswordRequiredException -> {
@@ -168,7 +174,7 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
                 },
                 actions = {
                     TextButton(
-                        enabled = entries != null && task == null,
+                        enabled = entries != null && ActiveTask.current == null,
                         onClick = { runExtract(null, false, null) }
                     ) { Text("Extrair tudo") }
                 }
@@ -230,9 +236,6 @@ internal fun ArchiveViewerScreen(archive: File, onClose: () -> Unit) {
         )
     }
 
-    task?.let { (title, progress) ->
-        ProgressDialog(title = title, progress = progress, onCancel = { progress.cancelled = true })
-    }
 }
 
 @Composable

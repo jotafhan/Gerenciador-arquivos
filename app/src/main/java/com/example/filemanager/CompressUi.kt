@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -20,6 +21,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -243,6 +245,12 @@ internal fun CompressDialog(
 
     val isZip = format == ArchiveFormat.ZIP
     val canLevel = format != ArchiveFormat.TAR
+    val levelOptions = if (format == ArchiveFormat.TAR_BZ2 || format == ArchiveFormat.TAR_XZ) {
+        LevelOption.entries.filter { it != LevelOption.STORE } // esses formatos sempre comprimem
+    } else {
+        LevelOption.entries.toList()
+    }
+    val effectiveLevel = if (level in levelOptions) level else LevelOption.FAST
     val needsPassword = isZip && encryption != EncryptionOption.NONE
     val valid = name.isNotBlank() && (!needsPassword || password.isNotEmpty())
 
@@ -280,12 +288,24 @@ internal fun CompressDialog(
                     ) { format = it }
                     DropdownField(
                         label = "Nível de compressão",
-                        valueLabel = if (canLevel) level.label else "—",
-                        options = LevelOption.entries.map { it.label to it },
+                        valueLabel = if (canLevel) effectiveLevel.label else "—",
+                        options = levelOptions.map { it.label to it },
                         enabled = canLevel,
                         modifier = Modifier.weight(1f)
                     ) { level = it }
                 }
+                Text(
+                    text = when {
+                        format == ArchiveFormat.TAR ->
+                            "TAR só junta os arquivos, sem comprimir: o tamanho fica igual ao original."
+                        effectiveLevel == LevelOption.STORE ->
+                            "Sem compressão só junta os arquivos num pacote: o tamanho fica quase igual ao original."
+                        else ->
+                            "Fotos, vídeos, MP3, APK e ZIP já vêm comprimidos: o tamanho quase não muda."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 DropdownField(
                     label = "Criptografia",
                     valueLabel = if (isZip) encryption.label else "Só disponível no ZIP",
@@ -327,7 +347,7 @@ internal fun CompressDialog(
                         name.trim(),
                         CompressOptions(
                             format = format,
-                            level = level,
+                            level = effectiveLevel,
                             encryption = if (isZip) encryption else EncryptionOption.NONE,
                             password = if (needsPassword) password else "",
                             splitBytes = if (isZip) split.bytes else null,
@@ -360,7 +380,12 @@ internal fun CompressDialog(
 
 /** Mostra o andamento de uma operação longa (compactar/extrair) com botão de cancelar. */
 @Composable
-internal fun ProgressDialog(title: String, progress: OpProgress, onCancel: () -> Unit) {
+internal fun ProgressDialog(
+    title: String,
+    progress: OpProgress,
+    onCancel: () -> Unit,
+    onHide: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
@@ -404,6 +429,85 @@ internal fun ProgressDialog(title: String, progress: OpProgress, onCancel: () ->
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onCancel) { Text("Cancelar") } }
+        confirmButton = { TextButton(onClick = onCancel) { Text("Cancelar") } },
+        dismissButton = {
+            if (onHide != null) TextButton(onClick = onHide) { Text("Ocultar") }
+        }
     )
+}
+
+// ------------------------------------------------------------------ Operação em andamento (global)
+
+/** A operação longa em andamento (compactar/extrair), visível em qualquer tela do app. */
+object ActiveTask {
+    var current by mutableStateOf<Pair<String, OpProgress>?>(null)
+    var hidden by mutableStateOf(false)
+
+    fun start(title: String, progress: OpProgress) {
+        current = title to progress
+        hidden = false
+    }
+
+    /** Encerra e diz se a janela estava oculta (para avisar o fim com um Toast). */
+    fun finish(): Boolean {
+        val wasHidden = hidden
+        current = null
+        hidden = false
+        return wasHidden
+    }
+}
+
+/** Faixa compacta mostrada quando a janela de progresso está oculta. Tocar reabre a janela. */
+@Composable
+internal fun ProgressBanner(title: String, progress: OpProgress, onShow: () -> Unit, onCancel: () -> Unit) {
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(300)
+            tick++
+        }
+    }
+    val refresh = tick
+    val total = progress.total
+    val done = progress.done
+    val percent = if (total > 0) ((done * 100) / total).coerceIn(0L, 100L) else -1L
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onShow)
+                    .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        if (percent >= 0) "$percent%  •  toque para ver" else "Em andamento  •  toque para ver",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                TextButton(onClick = onCancel) { Text("Cancelar") }
+            }
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { (done.toFloat() / total).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
 }
