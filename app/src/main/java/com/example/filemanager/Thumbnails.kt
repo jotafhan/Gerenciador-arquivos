@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
+import android.os.Build
 import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
 import android.os.ParcelFileDescriptor
@@ -24,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,10 +43,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.Executors
 import java.text.DateFormat
 import java.util.Date
 
@@ -57,23 +59,30 @@ object Thumbnails {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    // No máximo 3 miniaturas sendo geradas ao mesmo tempo
-    private val limiter = Semaphore(3)
+    // Só 2 miniaturas ao mesmo tempo e em prioridade baixa, para não competir com a rolagem
+    private val dispatcher = Executors.newFixedThreadPool(2) { runnable ->
+        Thread {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            runnable.run()
+        }
+    }.asCoroutineDispatcher()
 
-    fun supports(file: File): Boolean {
-        if (!file.isFile) return false
+    fun clear() {
+        cache.evictAll()
+    }
+
+    fun supports(file: File, isDir: Boolean): Boolean {
+        if (isDir) return false
         val ext = file.extension.lowercase()
         if (ext == "apk" || ext == "pdf") return true
         val cat = categoryOf(file)
         return (cat == Category.IMAGES && ext != "svg") || cat == Category.VIDEOS || cat == Category.AUDIO
     }
 
-    suspend fun load(context: Context, file: File, px: Int): Bitmap? {
-        val key = "${file.absolutePath}|${file.lastModified()}|$px"
+    suspend fun load(context: Context, file: File, px: Int, modified: Long): Bitmap? {
+        val key = "${file.absolutePath}|$modified|$px"
         cache.get(key)?.let { return it }
-        val bitmap = limiter.withPermit {
-            withContext(Dispatchers.IO) { runCatching { create(context, file, px) }.getOrNull() }
-        }
+        val bitmap = withContext(dispatcher) { runCatching { create(context, file, px) }.getOrNull() }
         if (bitmap != null) cache.put(key, bitmap)
         return bitmap
     }
@@ -85,7 +94,7 @@ object Thumbnails {
             ext == "apk" -> apkIcon(context, file, px)
             ext == "pdf" -> pdfPage(file, px)
             category == Category.IMAGES -> image(file, px)
-            category == Category.VIDEOS -> videoFrame(file)
+            category == Category.VIDEOS -> videoFrame(file, px)
             category == Category.AUDIO -> audioCover(file)
             else -> null
         } ?: return null
@@ -123,11 +132,15 @@ object Thumbnails {
         return bitmap
     }
 
-    private fun videoFrame(file: File): Bitmap? {
+    private fun videoFrame(file: File, px: Int): Bitmap? {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(file.absolutePath)
-            return retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            return if (Build.VERSION.SDK_INT >= 27) {
+                retriever.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, px, px)
+            } else {
+                retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
         } finally {
             retriever.release()
         }
@@ -177,12 +190,20 @@ object Thumbnails {
 
 /** Ícone do arquivo: miniatura quando existir; senão um quadrado colorido com o tipo. */
 @Composable
-internal fun FileIcon(file: File, size: Dp, modifier: Modifier = Modifier) {
+internal fun FileIcon(file: File, size: Dp, modifier: Modifier = Modifier, entry: FileEntry? = null) {
     val context = LocalContext.current
     val px = with(LocalDensity.current) { size.roundToPx() }
-    val modified = file.lastModified()
-    val thumb by produceState<ImageBitmap?>(null, file.absolutePath, modified, px) {
-        value = if (Thumbnails.supports(file)) Thumbnails.load(context, file, px)?.asImageBitmap() else null
+    // Sem os dados prontos, lê uma vez e guarda (não consulta o armazenamento a cada recomposição)
+    val fallback = remember(file.absolutePath, entry) { if (entry == null) FileOps.entryOf(file) else null }
+    val info = entry ?: fallback ?: FileEntry(file, false, 0L, 0L)
+    val modified = info.modified
+    val showThumbs = AppSettings.showThumbnails
+    val thumb by produceState<ImageBitmap?>(null, file.absolutePath, modified, px, showThumbs) {
+        value = if (showThumbs && Thumbnails.supports(file, info.isDir)) {
+            Thumbnails.load(context, file, px, modified)?.asImageBitmap()
+        } else {
+            null
+        }
     }
     val bitmap = thumb
     if (bitmap != null) {
@@ -193,7 +214,7 @@ internal fun FileIcon(file: File, size: Dp, modifier: Modifier = Modifier) {
             modifier = modifier.size(size).clip(RoundedCornerShape(10.dp))
         )
     } else {
-        val isDir = file.isDirectory
+        val isDir = info.isDir
         val cat = categoryOf(file)
         val background = when {
             isDir -> Color(0xFF2A3F9F)
@@ -233,9 +254,12 @@ internal fun FileCell(
     selectionMode: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    entry: FileEntry? = null
 ) {
     val context = LocalContext.current
+    val fallback = remember(file.absolutePath, entry) { if (entry == null) FileOps.entryOf(file) else null }
+    val info = entry ?: fallback ?: FileEntry(file, false, 0L, 0L)
     Column(
         modifier = Modifier
             .padding(4.dp)
@@ -246,7 +270,7 @@ internal fun FileCell(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(contentAlignment = Alignment.TopEnd) {
-            FileIcon(file, 72.dp)
+            FileIcon(file, 72.dp, entry = info)
             if (selectionMode && isSelected) {
                 Box(
                     modifier = Modifier
@@ -267,10 +291,10 @@ internal fun FileCell(
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 6.dp)
         )
-        val detail = if (file.isDirectory) {
+        val detail = if (info.isDir) {
             folderSize?.let { android.text.format.Formatter.formatFileSize(context, it) }
         } else {
-            android.text.format.Formatter.formatFileSize(context, file.length())
+            android.text.format.Formatter.formatFileSize(context, info.size)
         }
         if (detail != null) {
             Text(

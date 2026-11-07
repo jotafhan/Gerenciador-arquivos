@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         hasAccess.value = checkAccess()
         Favorites.init(applicationContext)
+        AppSettings.init(applicationContext)
         handleLaunchIntent(intent)
 
         setContent {

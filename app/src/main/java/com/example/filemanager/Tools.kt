@@ -57,6 +57,7 @@ const val TOOL_SPACE = "SPACE"
 const val TOOL_DUPLICATES = "DUPLICATES"
 const val TOOL_APPS = "APPS"
 const val TOOL_FAVORITES = "FAVORITES"
+const val TOOL_SETTINGS = "SETTINGS"
 
 private fun fmt(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
@@ -69,6 +70,7 @@ fun ToolHost(tool: String, storage: File, onClose: () -> Unit, onShowInFolder: (
         TOOL_DUPLICATES -> DuplicatesScreen(storage = storage, onClose = onClose)
         TOOL_APPS -> AppsScreen(storage = storage, onClose = onClose)
         TOOL_FAVORITES -> FavoritesScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
+        TOOL_SETTINGS -> SettingsScreen(onClose = onClose)
         else -> {
             val cat = Category.entries.firstOrNull { it.name == tool }
             if (cat != null) {
@@ -188,6 +190,7 @@ internal fun CategoryScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<File?>(null) }
 
+    var apkToInstall by remember { mutableStateOf<File?>(null) }
     val listState = rememberLazyListState()
     LaunchedEffect(sortName, ascending) { listState.scrollToItem(0) }
     LaunchedEffect(cat) {
@@ -204,6 +207,15 @@ internal fun CategoryScreen(
 
     val sortKey = SortKey.valueOf(sortName)
     val totalBytes = remember(sorted) { sorted.sumOf { it.size } }
+
+    apkToInstall?.let { f ->
+        InstallApkDialog(
+            file = f,
+            onDismiss = { apkToInstall = null },
+            onViewContent = null,
+            onResult = { msg -> scope.launch { snackbar.showSnackbar(msg) } }
+        )
+    }
 
     fun trash(file: File) {
         scope.launch {
@@ -268,10 +280,17 @@ internal fun CategoryScreen(
                     items(sorted, key = { it.file.absolutePath }) { item ->
                         FileRow(
                             file = item.file,
+                            entry = FileEntry(item.file, false, item.size, item.modified),
                             extra = item.file.parent?.removePrefix(storage.absolutePath),
                             selectionMode = false,
                             isSelected = false,
-                            onClick = { FileOpener.open(context, item.file) },
+                            onClick = {
+                                if (ApkInstaller.isInstallable(item.file)) {
+                                    apkToInstall = item.file
+                                } else {
+                                    FileOpener.open(context, item.file)
+                                }
+                            },
                             onLongClick = { picked = item.file }
                         )
                         HorizontalDivider()

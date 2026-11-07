@@ -8,6 +8,9 @@ enum class SortKey(val label: String) {
     SIZE("Tamanho")
 }
 
+/** Tipo, tamanho e data de um item, lidos uma vez só (cada consulta ao armazenamento é lenta). */
+data class FileEntry(val file: File, val isDir: Boolean, val size: Long, val modified: Long)
+
 /** Operações de arquivo (sem interface). Rodam fora da thread principal. */
 object FileOps {
 
@@ -110,6 +113,43 @@ object FileOps {
         if (errors.isNotEmpty()) error(errors.first())
         if (dir.listFiles().isNullOrEmpty()) dir.delete()
         Unit
+    }
+
+    /** Lê tipo, tamanho e data numa única chamada ao sistema. */
+    fun entryOf(file: File): FileEntry =
+        try {
+            val attrs = java.nio.file.Files.readAttributes(
+                file.toPath(),
+                java.nio.file.attribute.BasicFileAttributes::class.java
+            )
+            val dir = attrs.isDirectory
+            FileEntry(file, dir, if (dir) 0L else attrs.size(), attrs.lastModifiedTime().toMillis())
+        } catch (e: Exception) {
+            FileEntry(file, file.isDirectory, file.length(), file.lastModified())
+        }
+
+    fun listEntries(dir: File, showHidden: Boolean): List<FileEntry> =
+        (dir.listFiles() ?: emptyArray())
+            .filter { showHidden || !it.name.startsWith(".") }
+            .map { entryOf(it) }
+
+    /** Mesma ordenação de [sort], mas sem consultar o armazenamento (usa os dados já lidos). */
+    fun sortEntries(
+        list: List<FileEntry>,
+        key: SortKey,
+        ascending: Boolean,
+        dirSizes: Map<String, Long> = emptyMap()
+    ): List<FileEntry> {
+        val byKey: Comparator<FileEntry> = when (key) {
+            SortKey.NAME -> compareBy<FileEntry, String>(String.CASE_INSENSITIVE_ORDER) { it.file.name }
+            SortKey.DATE -> compareBy<FileEntry> { it.modified }
+            SortKey.SIZE -> compareBy<FileEntry> {
+                if (it.isDir) (dirSizes[it.file.absolutePath] ?: 0L) else it.size
+            }
+        }
+        val ordered = if (ascending) byKey else byKey.reversed()
+        val full = if (key == SortKey.SIZE) ordered else compareByDescending<FileEntry> { it.isDir }.then(ordered)
+        return list.sortedWith(full)
     }
 
     fun createFile(parent: File, name: String): Result<File> = runCatching {

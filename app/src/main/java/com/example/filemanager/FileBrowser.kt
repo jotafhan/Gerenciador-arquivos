@@ -87,6 +87,7 @@ private sealed interface DialogState {
     data object NewFile : DialogState
     data class AddTo(val files: List<File>) : DialogState
     data class ExtractPassword(val file: File, val dest: File, val wrong: Boolean) : DialogState
+    data class InstallApk(val file: File) : DialogState
 }
 
 /** Tela principal: o início (home) e o navegador de arquivos, com as ferramentas por cima. */
@@ -97,6 +98,7 @@ fun FileBrowserScreen() {
     var tool by rememberSaveable { mutableStateOf("") } // "" = nenhuma ferramenta aberta
     var toolChanges by remember { mutableIntStateOf(0) }
     var jumpTo by remember { mutableStateOf<String?>(null) }
+    var viewArchive by rememberSaveable { mutableStateOf<String?>(null) }
 
     fun closeTool() {
         tool = ""
@@ -122,8 +124,9 @@ fun FileBrowserScreen() {
             onOpenTool = { tool = it },
             jumpRequest = jumpTo,
             onJumpHandled = { jumpTo = null },
-            active = !home && tool.isEmpty(),
-            onGoHome = { home = true }
+            active = !home && tool.isEmpty() && viewArchive == null,
+            onGoHome = { home = true },
+            onViewArchive = { viewArchive = it.absolutePath }
         )
         if (home) {
             Surface(Modifier.fillMaxSize()) {
@@ -135,6 +138,11 @@ fun FileBrowserScreen() {
                     },
                     onOpenTool = { tool = it }
                 )
+            }
+        }
+        viewArchive?.let { path ->
+            Surface(Modifier.fillMaxSize()) {
+                ArchiveViewerScreen(archive = File(path), onClose = { viewArchive = null })
             }
         }
         if (tool.isNotEmpty()) {
@@ -162,7 +170,8 @@ private fun BrowserContent(
     jumpRequest: String?,
     onJumpHandled: () -> Unit,
     active: Boolean,
-    onGoHome: () -> Unit
+    onGoHome: () -> Unit,
+    onViewArchive: (File) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -170,7 +179,7 @@ private fun BrowserContent(
 
     // Estado que sobrevive a girar a tela
     var currentPath by rememberSaveable { mutableStateOf(root.absolutePath) }
-    var showHidden by rememberSaveable { mutableStateOf(false) }
+    var showHidden by rememberSaveable { mutableStateOf(AppSettings.showHiddenDefault) }
     var sortName by rememberSaveable { mutableStateOf(SortKey.NAME.name) }
     var ascending by rememberSaveable { mutableStateOf(true) }
     var searching by rememberSaveable { mutableStateOf(false) }
@@ -184,6 +193,7 @@ private fun BrowserContent(
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
+    var progressTask by remember { mutableStateOf<Pair<String, OpProgress>?>(null) }
     var selectedBytes by remember { mutableStateOf<Long?>(null) }
 
     // Tamanho total dos itens selecionados (pastas incluem o conteúdo)
@@ -199,7 +209,7 @@ private fun BrowserContent(
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
     val prefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
-    var gridMode by remember { mutableStateOf(prefs.getBoolean("grid_mode", false)) }
+    val gridMode = AppSettings.gridMode
     var newMenuOpen by remember { mutableStateOf(false) }
     var sortMenuOpen by remember { mutableStateOf(false) }
     // Ao mudar a ordenação (ou de pasta), volta ao primeiro item da lista
@@ -214,9 +224,19 @@ private fun BrowserContent(
     val title = if (canGoUp) current.name else "Armazenamento interno"
     val inSearch = searching && query.isNotBlank()
 
-    val rawEntries = remember(currentPath, showHidden, refreshKey, refreshSignal) {
-        FileOps.list(File(currentPath), showHidden)
+    // A listagem é lida fora da thread principal: no armazenamento do Android cada arquivo
+    // consultado custa uma chamada lenta ao sistema, e fazer isso ao rolar travava a lista.
+    var listing by remember { mutableStateOf<Pair<String, List<FileEntry>>>("" to emptyList()) }
+    var loadingList by remember { mutableStateOf(false) }
+    LaunchedEffect(currentPath, showHidden, refreshKey, refreshSignal) {
+        loadingList = true
+        val dir = File(currentPath)
+        val result = withContext(Dispatchers.IO) { FileOps.listEntries(dir, showHidden) }
+        listing = dir.absolutePath to result
+        loadingList = false
     }
+    val rawEntries: List<FileEntry> = if (listing.first == currentPath) listing.second else emptyList()
+    val metaByPath = remember(rawEntries) { rawEntries.associateBy { it.file.absolutePath } }
 
     // Tamanho das pastas (só calculado ao ordenar por tamanho; chega pasta por pasta)
     var folderSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
@@ -225,9 +245,9 @@ private fun BrowserContent(
         if (sortName == SortKey.SIZE.name) {
             sizing = true
             folderSizes = emptyMap()
-            for (d in rawEntries.filter { it.isDirectory }) {
-                val bytes = withContext(Dispatchers.IO) { Scanner.measure(listOf(d)).bytes }
-                folderSizes = folderSizes + (d.absolutePath to bytes)
+            for (d in rawEntries.filter { it.isDir }) {
+                val bytes = withContext(Dispatchers.IO) { Scanner.measure(listOf(d.file)).bytes }
+                folderSizes = folderSizes + (d.file.absolutePath to bytes)
             }
             sizing = false
         } else {
@@ -237,22 +257,26 @@ private fun BrowserContent(
     }
 
     val folderEntries = remember(rawEntries, sortName, ascending, folderSizes) {
-        FileOps.sort(rawEntries, sortKey, ascending, folderSizes)
+        FileOps.sortEntries(rawEntries, sortKey, ascending, folderSizes).map { it.file }
     }
 
     var searchResults by remember { mutableStateOf<List<File>>(emptyList()) }
+    var searchMeta by remember { mutableStateOf<Map<String, FileEntry>>(emptyMap()) }
     var searchRunning by remember { mutableStateOf(false) }
     LaunchedEffect(searching, query, currentPath, showHidden, refreshKey) {
         if (searching && query.isNotBlank()) {
             searchRunning = true
             delay(350) // espera o usuário parar de digitar
-            val found = withContext(Dispatchers.IO) {
-                FileOps.search(File(currentPath), query, showHidden)
+            val sorted = withContext(Dispatchers.IO) {
+                val found = FileOps.search(File(currentPath), query, showHidden).map { FileOps.entryOf(it) }
+                FileOps.sortEntries(found, sortKey, ascending, folderSizes)
             }
-            searchResults = FileOps.sort(found, sortKey, ascending, folderSizes)
+            searchResults = sorted.map { it.file }
+            searchMeta = sorted.associateBy { it.file.absolutePath }
             searchRunning = false
         } else {
             searchResults = emptyList()
+            searchMeta = emptyMap()
             searchRunning = false
         }
     }
@@ -261,6 +285,7 @@ private fun BrowserContent(
     }
 
     val entries = if (inSearch) searchResults else folderEntries
+    val metaOf = if (inSearch) searchMeta else metaByPath
 
     val shortcuts = remember {
         buildList<Pair<String, File>> {
@@ -311,12 +336,37 @@ private fun BrowserContent(
         }
     }
 
-    /** Extrai um arquivo compactado; se pedir senha, abre o diálogo de senha. */
-    fun extractArchive(file: File, dest: File, password: String?) {
+    /** Roda uma operação longa em segundo plano, com janela de progresso e botão de cancelar. */
+    fun runArchiveOp(title: String, successMessage: String, work: (OpProgress) -> List<String>) {
+        val progress = OpProgress()
+        progressTask = title to progress
         scope.launch {
             busy = true
-            val result = withContext(Dispatchers.IO) { Archives.extract(file, dest, password) }
+            val errors = withContext(Dispatchers.IO) {
+                try {
+                    work(progress)
+                } catch (e: OperationCancelledException) {
+                    listOf("Cancelado")
+                }
+            }
             busy = false
+            progressTask = null
+            selected = emptySet()
+            refreshKey++
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(if (errors.isEmpty()) successMessage else errors.first())
+        }
+    }
+
+    /** Extrai um arquivo compactado; se pedir senha, abre o diálogo de senha. */
+    fun extractArchive(file: File, dest: File, password: String?) {
+        val progress = OpProgress()
+        progressTask = "Extraindo ${file.name}..." to progress
+        scope.launch {
+            busy = true
+            val result = withContext(Dispatchers.IO) { Archives.extract(file, dest, password, progress) }
+            busy = false
+            progressTask = null
             selected = emptySet()
             refreshKey++
             val error = result.exceptionOrNull()
@@ -508,6 +558,13 @@ private fun BrowserContent(
                                 )
                                 if (one != null && Archives.isArchive(one)) {
                                     DropdownMenuItem(
+                                        text = { Text("Ver conteúdo") },
+                                        onClick = {
+                                            moreOpen = false
+                                            onViewArchive(one)
+                                        }
+                                    )
+                                    DropdownMenuItem(
                                         text = { Text("Extrair aqui") },
                                         onClick = {
                                             moreOpen = false
@@ -637,6 +694,13 @@ private fun BrowserContent(
                                         refreshKey++
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Configurações") },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenTool(TOOL_SETTINGS)
+                                    }
+                                )
                             }
                         }
                     }
@@ -677,8 +741,8 @@ private fun BrowserContent(
                     }
                     IconButton(
                         onClick = {
-                            gridMode = !gridMode
-                            prefs.edit().putBoolean("grid_mode", gridMode).apply()
+                            AppSettings.gridMode = !gridMode
+                            prefs.edit().putBoolean("grid_mode", AppSettings.gridMode).apply()
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text(if (gridMode) "☰" else "▦", fontSize = 20.sp) }
@@ -735,7 +799,7 @@ private fun BrowserContent(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (busy || sizing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            if (busy || sizing || loadingList) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
             if (searching) {
                 OutlinedTextField(
@@ -785,6 +849,7 @@ private fun BrowserContent(
             val message = when {
                 searching && query.isBlank() -> "Digite para buscar"
                 inSearch && searchRunning -> "Buscando..."
+                loadingList && !inSearch && entries.isEmpty() -> "Carregando..."
                 entries.isEmpty() -> if (inSearch) "Nenhum resultado" else "Pasta vazia ou sem acesso"
                 else -> null
             }
@@ -800,9 +865,11 @@ private fun BrowserContent(
                         contentPadding = PaddingValues(6.dp)
                     ) {
                         gridItems(entries, key = { it.absolutePath }) { file ->
+                            val entry = metaOf[file.absolutePath]
                             FileCell(
                                 file = file,
-                                folderSize = if (file.isDirectory) folderSizes[file.absolutePath] else null,
+                                folderSize = if (entry?.isDir == true) folderSizes[file.absolutePath] else null,
+                                entry = entry,
                                 selectionMode = selected.isNotEmpty(),
                                 isSelected = file.absolutePath in selected,
                                 onClick = {
@@ -815,6 +882,13 @@ private fun BrowserContent(
                                             }
                                         }
                                         file.isDirectory -> navigateTo(file)
+                                        ApkInstaller.isInstallable(file) -> {
+                                            if (AppSettings.confirmInstall) {
+                                                dialog = DialogState.InstallApk(file)
+                                            } else {
+                                                ApkInstaller.install(context, file)?.let { say(it) }
+                                            }
+                                        }
                                         Archives.isArchive(file) -> {
                                             dialog = DialogState.ZipChoice(file)
                                         }
@@ -834,12 +908,14 @@ private fun BrowserContent(
                 } else {
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(entries, key = { it.absolutePath }) { file ->
+                        val entry = metaOf[file.absolutePath]
                         FileRow(
                             file = file,
                             extra = if (inSearch) file.parent?.removePrefix(root.absolutePath) else null,
                             selectionMode = selected.isNotEmpty(),
                             isSelected = file.absolutePath in selected,
-                            folderSize = if (file.isDirectory) folderSizes[file.absolutePath] else null,
+                            folderSize = if (entry?.isDir == true) folderSizes[file.absolutePath] else null,
+                            entry = entry,
                             onClick = {
                                 when {
                                     selected.isNotEmpty() -> {
@@ -850,6 +926,13 @@ private fun BrowserContent(
                                         }
                                     }
                                     file.isDirectory -> navigateTo(file)
+                                    ApkInstaller.isInstallable(file) -> {
+                                        if (AppSettings.confirmInstall) {
+                                            dialog = DialogState.InstallApk(file)
+                                        } else {
+                                            ApkInstaller.install(context, file)?.let { say(it) }
+                                        }
+                                    }
                                     Archives.isArchive(file) -> {
                                         dialog = DialogState.ZipChoice(file)
                                     }
@@ -870,6 +953,10 @@ private fun BrowserContent(
                 }
             }
         }
+    }
+
+    progressTask?.let { (title, progress) ->
+        ProgressDialog(title = title, progress = progress, onCancel = { progress.cancelled = true })
     }
 
     when (val d = dialog) {
@@ -929,23 +1016,15 @@ private fun BrowserContent(
         }
         is DialogState.ZipChoice -> {
             val zipFile = d.file
-            AlertDialog(
-                onDismissRequest = { dialog = null },
-                title = { Text(zipFile.name) },
-                text = { Text("O que fazer com este arquivo compactado?") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        dialog = null
-                        val dest = zipFile.parentFile ?: current
-                        extractArchive(zipFile, dest, null)
-                    }) { Text("Extrair aqui") }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        dialog = null
-                        FileOpener.open(context, zipFile)
-                    }) { Text("Abrir com outro app") }
-                }
+            ActionsDialog(
+                title = zipFile.name,
+                info = "Arquivo compactado",
+                actions = listOf(
+                    Act("Ver conteúdo") { onViewArchive(zipFile) },
+                    Act("Extrair aqui") { extractArchive(zipFile, zipFile.parentFile ?: current, null) },
+                    Act("Abrir com outro app") { FileOpener.open(context, zipFile) }
+                ),
+                onDismiss = { dialog = null }
             )
         }
         is DialogState.Compress -> {
@@ -957,8 +1036,8 @@ private fun BrowserContent(
                 onDismiss = { dialog = null },
                 onConfirm = { dest, name, options ->
                     dialog = null
-                    runOp("Arquivo criado") {
-                        val error = Archives.compress(toPack, dest, name, options).exceptionOrNull()
+                    runArchiveOp("Compactando...", "Arquivo criado") { progress ->
+                        val error = Archives.compress(toPack, dest, name, options, progress).exceptionOrNull()
                         if (error != null) {
                             listOf(error.message ?: "Erro ao compactar")
                         } else if (options.deleteAfter) {
@@ -1060,6 +1139,15 @@ private fun BrowserContent(
                 dialog = null
                 extractArchive(d.file, d.dest, pwd)
             }
+        )
+        is DialogState.InstallApk -> InstallApkDialog(
+            file = d.file,
+            onDismiss = { dialog = null },
+            onViewContent = { f ->
+                dialog = null
+                onViewArchive(f)
+            },
+            onResult = { msg -> say(msg) }
         )
         is DialogState.Details -> DetailsDialog(files = d.files, onDismiss = { dialog = null })
         null -> {}
@@ -1246,16 +1334,17 @@ internal fun FileRow(
     isSelected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    folderSize: Long? = null
+    folderSize: Long? = null,
+    entry: FileEntry? = null
 ) {
     val context = LocalContext.current
-    val modified = file.lastModified()
-    val date = remember(file.absolutePath, modified) {
-        DateFormat.getDateTimeInstance().format(Date(modified))
-    }
+    // Sem os dados prontos, lê uma vez e guarda (não consulta o armazenamento a cada recomposição)
+    val fallback = remember(file.absolutePath, entry) { if (entry == null) FileOps.entryOf(file) else null }
+    val info = entry ?: fallback ?: FileEntry(file, false, 0L, 0L)
+    val date = remember(info.modified) { rowDateFormat.format(Date(info.modified)) }
     val subtitle = buildString {
-        if (!file.isDirectory) {
-            append(Formatter.formatFileSize(context, file.length()))
+        if (!info.isDir) {
+            append(Formatter.formatFileSize(context, info.size))
             append("  •  ")
         } else if (folderSize != null) {
             append(Formatter.formatFileSize(context, folderSize))
@@ -1278,7 +1367,7 @@ internal fun FileRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (selectionMode) Checkbox(checked = isSelected, onCheckedChange = null)
-        FileIcon(file, 44.dp)
+        FileIcon(file, 44.dp, entry = info)
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = file.name,
@@ -1308,3 +1397,6 @@ fun PermissionScreen(onRequest: () -> Unit) {
 /** Agrupa por tipo para "Mesmo tipo": pasta, uma das categorias ou "outros". */
 private fun typeKey(file: File): String =
     if (file.isDirectory) "dir" else (categoryOf(file)?.name ?: "other")
+
+// Um único formatador de data para todas as linhas (criar um por linha era caro)
+private val rowDateFormat: DateFormat = DateFormat.getDateTimeInstance()

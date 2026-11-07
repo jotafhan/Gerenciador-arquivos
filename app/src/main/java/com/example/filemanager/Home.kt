@@ -195,6 +195,13 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                                         refresh++
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Configurações") },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenTool(TOOL_SETTINGS)
+                                    }
+                                )
                             }
                         }
                     }

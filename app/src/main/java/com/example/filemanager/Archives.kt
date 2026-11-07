@@ -29,9 +29,13 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
+import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.Date
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.ZipFile as JavaZipFile
 
 // ------------------------------------------------------------------ Opções de compactação
 
@@ -81,8 +85,86 @@ data class CompressOptions(
 class PasswordRequiredException(val wrong: Boolean) :
     Exception(if (wrong) "Senha incorreta" else "Este arquivo está protegido por senha")
 
+/** O usuário cancelou a operação. */
+class OperationCancelledException : Exception("Cancelado")
+
+/** Progresso de uma operação longa. Lido pela tela e escrito pela thread de trabalho. */
+class OpProgress {
+    @Volatile var total: Long = 0L // 0 = desconhecido
+    @Volatile var done: Long = 0L
+    @Volatile var label: String = ""
+    @Volatile var cancelled: Boolean = false
+
+    fun check() {
+        if (cancelled) throw OperationCancelledException()
+    }
+}
+
+/** Uma entrada dentro de um arquivo compactado (para a tela "Ver conteúdo"). */
+data class ArchiveEntryInfo(val path: String, val isDir: Boolean, val size: Long, val modified: Long)
+
+// Buffers grandes: no armazenamento do Android cada leitura/escrita pequena é muito cara
+private const val BUF = 256 * 1024
+
+private fun norm(path: String): String = path.replace('\\', '/').trim('/')
+
+private fun copyStream(input: InputStream, output: OutputStream, progress: OpProgress?, count: Boolean) {
+    val buf = ByteArray(BUF)
+    while (true) {
+        val n = input.read(buf)
+        if (n < 0) break
+        output.write(buf, 0, n)
+        if (progress != null) {
+            progress.check()
+            if (count) progress.done += n
+        }
+    }
+}
+
+private class CountingInputStream(input: InputStream, private val onBytes: (Long) -> Unit) :
+    FilterInputStream(input) {
+    private var count = 0L
+
+    override fun read(): Int {
+        val b = super.read()
+        if (b >= 0) {
+            count++
+            onBytes(count)
+        }
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        val n = super.read(b, off, len)
+        if (n > 0) {
+            count += n
+            onBytes(count)
+        }
+        return n
+    }
+}
+
+private class CountingOutputStream(output: OutputStream, private val progress: OpProgress?) :
+    FilterOutputStream(output) {
+    override fun write(b: Int) {
+        out.write(b)
+        if (progress != null) {
+            progress.done += 1
+            progress.check()
+        }
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        out.write(b, off, len)
+        if (progress != null) {
+            progress.done += len
+            progress.check()
+        }
+    }
+}
+
 /**
- * Compactar e extrair vários formatos.
+ * Compactar, extrair e listar vários formatos.
  * Extrai: ZIP (inclusive com senha e em volumes), 7z, RAR (só RAR4), TAR, TAR.GZ/TGZ, TAR.BZ2, TAR.XZ, GZ, BZ2, XZ.
  * Compacta: ZIP (com senha e volumes), 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ.
  */
@@ -100,12 +182,20 @@ object Archives {
         return EXTENSIONS.any { name.endsWith(it) }
     }
 
+    /** ZIP e formatos que são ZIPs por dentro (APK, APKS, XAPK...). */
+    private fun isZipLike(lower: String): Boolean =
+        lower.endsWith(".zip") || lower.endsWith(".apk") || lower.endsWith(".apks") ||
+            lower.endsWith(".xapk") || lower.endsWith(".apkm") || lower.endsWith(".jar")
+
     private fun baseNameOf(file: File): String {
         val lower = file.name.lowercase()
         val ext = EXTENSIONS.firstOrNull { lower.endsWith(it) }
         val base = if (ext != null) file.name.dropLast(ext.length) else file.name.substringBeforeLast('.')
         return base.ifEmpty { "extraido" }
     }
+
+    /** Pasta onde "Extrair" coloca os arquivos: ao lado do arquivo compactado, com o nome dele. */
+    fun defaultExtractDir(archive: File): File = File(archive.parentFile, baseNameOf(archive))
 
     private fun uniqueTarget(dir: File, base: String, ext: String): File {
         var target = File(dir, "$base.$ext")
@@ -117,6 +207,87 @@ object Archives {
         return target
     }
 
+    private fun openZip(archive: File): JavaZipFile =
+        try {
+            JavaZipFile(archive)
+        } catch (e: IllegalArgumentException) {
+            // Nomes em codificação antiga (CP437/Latin-1)
+            JavaZipFile(archive, Charsets.ISO_8859_1)
+        }
+
+    // ------------------------------------------------------------ Listar
+
+    fun list(archive: File): Result<List<ArchiveEntryInfo>> = runCatching {
+        val lower = archive.name.lowercase()
+        when {
+            isZipLike(lower) -> listZip(archive)
+            lower.endsWith(".7z") -> list7z(archive)
+            lower.endsWith(".rar") -> listRar(archive)
+            lower.endsWith(".tar.gz") || lower.endsWith(".tgz") -> listTar(archive) { GzipCompressorInputStream(it) }
+            lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") -> listTar(archive) { BZip2CompressorInputStream(it) }
+            lower.endsWith(".tar.xz") || lower.endsWith(".txz") -> listTar(archive) { XZCompressorInputStream(it) }
+            lower.endsWith(".tar") -> listTar(archive) { it }
+            lower.endsWith(".gz") || lower.endsWith(".bz2") || lower.endsWith(".xz") ->
+                listOf(ArchiveEntryInfo(archive.nameWithoutExtension, false, -1L, archive.lastModified()))
+            else -> error("Formato não suportado")
+        }
+    }
+
+    private fun listZip(archive: File): List<ArchiveEntryInfo> =
+        try {
+            openZip(archive).use { zf ->
+                zf.entries().toList().map { e ->
+                    ArchiveEntryInfo(norm(e.name), e.isDirectory, if (e.isDirectory) 0L else e.size, e.time)
+                }
+            }
+        } catch (e: Exception) {
+            // ZIP em volumes: o zip4j sabe ler o índice
+            ZipFile(archive).use { z ->
+                z.fileHeaders.map { h ->
+                    ArchiveEntryInfo(norm(h.fileName), h.isDirectory, if (h.isDirectory) 0L else h.uncompressedSize, 0L)
+                }
+            }
+        }
+
+    private fun list7z(archive: File): List<ArchiveEntryInfo> =
+        SevenZFile.builder().setFile(archive).get().use { sz ->
+            sz.entries.map { e ->
+                val modified = runCatching { e.lastModifiedDate.time }.getOrDefault(0L)
+                ArchiveEntryInfo(norm(e.name), e.isDirectory, if (e.isDirectory) 0L else e.size, modified)
+            }
+        }
+
+    private fun listRar(archive: File): List<ArchiveEntryInfo> =
+        try {
+            Archive(archive).use { rar ->
+                rar.fileHeaders.map { h ->
+                    ArchiveEntryInfo(norm(h.fileName), h.isDirectory, if (h.isDirectory) 0L else h.fullUnpackSize, 0L)
+                }
+            }
+        } catch (e: Exception) {
+            throw friendly(e)
+        }
+
+    private fun listTar(archive: File, wrap: (InputStream) -> InputStream): List<ArchiveEntryInfo> {
+        val out = ArrayList<ArchiveEntryInfo>()
+        val input = wrap(BufferedInputStream(FileInputStream(archive), BUF))
+        TarArchiveInputStream(input).use { tis ->
+            var entry = tis.nextEntry
+            while (entry != null) {
+                out.add(
+                    ArchiveEntryInfo(
+                        norm(entry.name),
+                        entry.isDirectory,
+                        if (entry.isDirectory) 0L else entry.size,
+                        entry.lastModifiedDate?.time ?: 0L
+                    )
+                )
+                entry = tis.nextEntry
+            }
+        }
+        return out
+    }
+
     // ------------------------------------------------------------ Extrair
 
     private fun isZipEncrypted(file: File): Boolean =
@@ -125,54 +296,65 @@ object Archives {
     private fun hasSplitParts(zip: File): Boolean =
         File(zip.parentFile, zip.name.dropLast(4) + ".z01").exists()
 
-    fun extract(archive: File, destDir: File, password: String? = null): Result<File> = runCatching {
-        val lower = archive.name.lowercase()
-
-        if (lower.endsWith(".zip")) {
-            val encrypted = isZipEncrypted(archive)
-            if (!encrypted && password == null && !hasSplitParts(archive)) {
-                return@runCatching Zip.extract(archive, destDir).getOrThrow()
-            }
-            if (encrypted && password.isNullOrEmpty()) throw PasswordRequiredException(false)
-            val target = FileOps.uniqueTarget(destDir, baseNameOf(archive))
-            if (!target.mkdirs()) error("Não foi possível criar a pasta de destino")
-            try {
-                val zip = if (password.isNullOrEmpty()) ZipFile(archive) else ZipFile(archive, password.toCharArray())
-                zip.use { it.extractAll(target.absolutePath) }
-            } catch (e: ZipException) {
-                target.deleteRecursively()
-                if (e.type == ZipException.Type.WRONG_PASSWORD) throw PasswordRequiredException(true)
-                throw e
-            } catch (e: Exception) {
-                target.deleteRecursively()
-                throw e
-            }
-            return@runCatching target
-        }
-
+    /** Extrai tudo para uma pasta nova com o nome do arquivo, ao lado dele. */
+    fun extract(
+        archive: File,
+        destDir: File,
+        password: String? = null,
+        progress: OpProgress? = null
+    ): Result<File> = runCatching {
         val target = FileOps.uniqueTarget(destDir, baseNameOf(archive))
         if (!target.mkdirs()) error("Não foi possível criar a pasta de destino")
         try {
-            when {
-                lower.endsWith(".7z") -> extract7z(archive, target)
-                lower.endsWith(".rar") -> extractRar(archive, target)
-                lower.endsWith(".tar.gz") || lower.endsWith(".tgz") ->
-                    extractTar(archive, target) { GzipCompressorInputStream(it) }
-                lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") ->
-                    extractTar(archive, target) { BZip2CompressorInputStream(it) }
-                lower.endsWith(".tar.xz") || lower.endsWith(".txz") ->
-                    extractTar(archive, target) { XZCompressorInputStream(it) }
-                lower.endsWith(".tar") -> extractTar(archive, target) { it }
-                lower.endsWith(".gz") -> extractSingle(archive, target, ".gz") { GzipCompressorInputStream(it) }
-                lower.endsWith(".bz2") -> extractSingle(archive, target, ".bz2") { BZip2CompressorInputStream(it) }
-                lower.endsWith(".xz") -> extractSingle(archive, target, ".xz") { XZCompressorInputStream(it) }
-                else -> error("Formato não suportado")
-            }
+            extractInto(archive, target, password, progress, null)
         } catch (e: Exception) {
             target.deleteRecursively()
-            throw friendly(e)
+            throw if (e is PasswordRequiredException || e is OperationCancelledException) e else friendly(e)
         }
         target
+    }
+
+    /** Extrai só as entradas aceitas por [filter] (nome cru dentro do arquivo) direto para [destDir]. */
+    fun extractEntries(
+        archive: File,
+        destDir: File,
+        password: String?,
+        filter: (String) -> Boolean,
+        progress: OpProgress? = null
+    ): Result<File> = runCatching {
+        destDir.mkdirs()
+        try {
+            extractInto(archive, destDir, password, progress, filter)
+        } catch (e: Exception) {
+            throw if (e is PasswordRequiredException || e is OperationCancelledException) e else friendly(e)
+        }
+        destDir
+    }
+
+    private fun extractInto(
+        archive: File,
+        target: File,
+        password: String?,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
+        val lower = archive.name.lowercase()
+        when {
+            isZipLike(lower) -> extractZipAny(archive, target, password, progress, filter)
+            lower.endsWith(".7z") -> extract7z(archive, target, progress, filter)
+            lower.endsWith(".rar") -> extractRar(archive, target, progress, filter)
+            lower.endsWith(".tar.gz") || lower.endsWith(".tgz") ->
+                extractTar(archive, target, progress, filter) { GzipCompressorInputStream(it) }
+            lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") ->
+                extractTar(archive, target, progress, filter) { BZip2CompressorInputStream(it) }
+            lower.endsWith(".tar.xz") || lower.endsWith(".txz") ->
+                extractTar(archive, target, progress, filter) { XZCompressorInputStream(it) }
+            lower.endsWith(".tar") -> extractTar(archive, target, progress, filter) { it }
+            lower.endsWith(".gz") -> extractSingle(archive, target, ".gz", progress) { GzipCompressorInputStream(it) }
+            lower.endsWith(".bz2") -> extractSingle(archive, target, ".bz2", progress) { BZip2CompressorInputStream(it) }
+            lower.endsWith(".xz") -> extractSingle(archive, target, ".xz", progress) { XZCompressorInputStream(it) }
+            else -> error("Formato não suportado")
+        }
     }
 
     private fun friendly(e: Exception): Exception {
@@ -199,22 +381,138 @@ object Archives {
         return out
     }
 
-    private fun extract7z(archive: File, target: File) {
+    private fun extractZipAny(
+        archive: File,
+        target: File,
+        password: String?,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
+        val encrypted = isZipEncrypted(archive)
+        if (!encrypted && password == null && !hasSplitParts(archive)) {
+            extractPlainZip(archive, target, progress, filter)
+            return
+        }
+        if (encrypted && password.isNullOrEmpty()) throw PasswordRequiredException(false)
+        try {
+            extractZip4j(archive, target, password, progress, filter)
+        } catch (e: ZipException) {
+            if (progress?.cancelled == true) throw OperationCancelledException()
+            if (e.type == ZipException.Type.WRONG_PASSWORD) throw PasswordRequiredException(true)
+            throw e
+        }
+    }
+
+    /** ZIP comum: leitura direta por entrada (rápida) com buffer grande. */
+    private fun extractPlainZip(
+        archive: File,
+        target: File,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
+        openZip(archive).use { zf ->
+            val entries = zf.entries().toList()
+            if (progress != null && filter == null) {
+                progress.total = entries.sumOf { maxOf(it.size, 0L) }
+            }
+            for (entry in entries) {
+                progress?.check()
+                val name = entry.name
+                if (filter != null && !filter(name)) continue
+                val out = resolveSafe(target, name) ?: continue
+                if (entry.isDirectory) {
+                    out.mkdirs()
+                } else {
+                    out.parentFile?.mkdirs()
+                    progress?.label = name
+                    zf.getInputStream(entry).use { ins ->
+                        FileOutputStream(out).use { os -> copyStream(ins, os, progress, true) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractZip4j(
+        archive: File,
+        target: File,
+        password: String?,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
+        val zip = if (password.isNullOrEmpty()) ZipFile(archive) else ZipFile(archive, password.toCharArray())
+        zip.setBufferSize(BUF)
+        zip.use { z ->
+            if (filter == null) {
+                withMonitor(z, progress) { z.extractAll(target.absolutePath) }
+            } else {
+                for (h in z.fileHeaders.filter { filter(it.fileName) }) {
+                    progress?.check()
+                    z.extractFile(h, target.absolutePath)
+                }
+            }
+        }
+    }
+
+    /** Lê o progresso do zip4j em outra thread e repassa o cancelamento. */
+    private fun <T> withMonitor(zip: ZipFile, progress: OpProgress?, block: () -> T): T {
+        if (progress == null) return block()
+        val monitor = zip.progressMonitor
+        val running = AtomicBoolean(true)
+        val poller = Thread {
+            while (running.get()) {
+                progress.done = monitor.workCompleted
+                progress.total = monitor.totalWork
+                monitor.fileName?.let { progress.label = it }
+                if (progress.cancelled) monitor.isCancelAllTasks = true
+                try {
+                    Thread.sleep(150)
+                } catch (e: InterruptedException) {
+                    break
+                }
+            }
+        }
+        poller.isDaemon = true
+        poller.start()
+        try {
+            return block()
+        } finally {
+            running.set(false)
+            poller.interrupt()
+        }
+    }
+
+    private fun extract7z(
+        archive: File,
+        target: File,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
         SevenZFile.builder().setFile(archive).get().use { sz ->
-            val buf = ByteArray(64 * 1024)
+            if (progress != null && filter == null) {
+                progress.total = sz.entries.sumOf { if (it.isDirectory) 0L else it.size }
+            }
+            val buf = ByteArray(BUF)
             var entry = sz.nextEntry
             while (entry != null) {
-                val out = resolveSafe(target, entry.name)
+                progress?.check()
+                val name = entry.name
+                val out = if (filter != null && !filter(name)) null else resolveSafe(target, name)
                 if (out != null) {
                     if (entry.isDirectory) {
                         out.mkdirs()
                     } else {
                         out.parentFile?.mkdirs()
+                        progress?.label = name
                         FileOutputStream(out).use { os ->
                             while (true) {
                                 val n = sz.read(buf)
                                 if (n < 0) break
                                 os.write(buf, 0, n)
+                                if (progress != null) {
+                                    progress.check()
+                                    progress.done += n
+                                }
                             }
                         }
                     }
@@ -224,18 +522,29 @@ object Archives {
         }
     }
 
-    private fun extractRar(archive: File, target: File) {
+    private fun extractRar(
+        archive: File,
+        target: File,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?
+    ) {
         Archive(archive).use { rar ->
+            if (progress != null && filter == null) {
+                progress.total = rar.fileHeaders.sumOf { if (it.isDirectory) 0L else it.fullUnpackSize }
+            }
             var header = rar.nextFileHeader()
             while (header != null) {
+                progress?.check()
                 val h = header
-                val out = resolveSafe(target, h.fileName)
+                val name = h.fileName
+                val out = if (filter != null && !filter(name)) null else resolveSafe(target, name)
                 if (out != null) {
                     if (h.isDirectory) {
                         out.mkdirs()
                     } else {
                         out.parentFile?.mkdirs()
-                        FileOutputStream(out).use { os -> rar.extractFile(h, os) }
+                        progress?.label = name
+                        CountingOutputStream(FileOutputStream(out), progress).use { os -> rar.extractFile(h, os) }
                     }
                 }
                 header = rar.nextFileHeader()
@@ -243,18 +552,30 @@ object Archives {
         }
     }
 
-    private fun extractTar(archive: File, target: File, wrap: (InputStream) -> InputStream) {
-        val input = wrap(BufferedInputStream(FileInputStream(archive)))
+    private fun extractTar(
+        archive: File,
+        target: File,
+        progress: OpProgress?,
+        filter: ((String) -> Boolean)?,
+        wrap: (InputStream) -> InputStream
+    ) {
+        // Progresso pelos bytes lidos do arquivo compactado (funciona também com .gz/.bz2/.xz)
+        progress?.total = archive.length()
+        val counting = CountingInputStream(FileInputStream(archive)) { progress?.done = it }
+        val input = wrap(BufferedInputStream(counting, BUF))
         TarArchiveInputStream(input).use { tis ->
             var entry = tis.nextEntry
             while (entry != null) {
-                val out = resolveSafe(target, entry.name)
+                progress?.check()
+                val name = entry.name
+                val out = if (filter != null && !filter(name)) null else resolveSafe(target, name)
                 if (out != null) {
                     if (entry.isDirectory) {
                         out.mkdirs()
                     } else {
                         out.parentFile?.mkdirs()
-                        FileOutputStream(out).use { tis.copyTo(it) }
+                        progress?.label = name
+                        FileOutputStream(out).use { os -> copyStream(tis, os, progress, false) }
                     }
                 }
                 entry = tis.nextEntry
@@ -262,21 +583,34 @@ object Archives {
         }
     }
 
-    private fun extractSingle(archive: File, target: File, ext: String, wrap: (InputStream) -> InputStream) {
+    private fun extractSingle(
+        archive: File,
+        target: File,
+        ext: String,
+        progress: OpProgress?,
+        wrap: (InputStream) -> InputStream
+    ) {
+        progress?.total = archive.length()
         val name = archive.name.dropLast(ext.length).ifEmpty { "arquivo" }
-        wrap(BufferedInputStream(FileInputStream(archive))).use { input ->
-            FileOutputStream(File(target, name)).use { input.copyTo(it) }
+        progress?.label = name
+        val counting = CountingInputStream(FileInputStream(archive)) { progress?.done = it }
+        wrap(BufferedInputStream(counting, BUF)).use { input ->
+            FileOutputStream(File(target, name)).use { os -> copyStream(input, os, progress, false) }
         }
     }
 
     // ------------------------------------------------------------ Compactar
+
+    private fun totalSizeOf(files: List<File>): Long =
+        files.sumOf { f -> f.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
 
     /** Cria o(s) arquivo(s) compactado(s) em [destDir]. Devolve os arquivos criados. */
     fun compress(
         files: List<File>,
         destDir: File,
         baseName: String,
-        options: CompressOptions
+        options: CompressOptions,
+        progress: OpProgress? = null
     ): Result<List<File>> = runCatching {
         require(files.isNotEmpty()) { "Nada para compactar" }
         val groups = if (options.separate && files.size > 1) files.map { listOf(it) } else listOf(files)
@@ -289,10 +623,16 @@ object Archives {
                 baseName
             }
             val target = uniqueTarget(destDir, name.ifBlank { "Arquivos" }, options.format.ext)
+            if (progress != null) {
+                progress.done = 0L
+                progress.total = if (options.format == ArchiveFormat.ZIP) 0L else totalSizeOf(group)
+                progress.label = target.name
+            }
             try {
-                write(group, target, options)
+                write(group, target, options, progress)
             } catch (e: Exception) {
                 cleanup(target, options)
+                if (progress?.cancelled == true) throw OperationCancelledException()
                 throw e
             }
             created.add(target)
@@ -331,20 +671,24 @@ object Archives {
         LevelOption.MAX -> 6
     }
 
-    private fun write(files: List<File>, target: File, o: CompressOptions) {
+    private fun write(files: List<File>, target: File, o: CompressOptions, progress: OpProgress?) {
         when (o.format) {
-            ArchiveFormat.ZIP -> writeZip(files, target, o)
-            ArchiveFormat.SEVEN_Z -> write7z(files, target, o.level)
-            ArchiveFormat.TAR -> writeTar(files, target) { it }
-            ArchiveFormat.TAR_GZ -> writeTar(files, target) {
+            ArchiveFormat.ZIP -> writeZip(files, target, o, progress)
+            ArchiveFormat.SEVEN_Z -> write7z(files, target, o.level, progress)
+            ArchiveFormat.TAR -> writeTar(files, target, progress) { it }
+            ArchiveFormat.TAR_GZ -> writeTar(files, target, progress) {
                 GzipCompressorOutputStream(it, GzipParameters().apply { compressionLevel = gzLevel(o.level) })
             }
-            ArchiveFormat.TAR_BZ2 -> writeTar(files, target) { BZip2CompressorOutputStream(it, bzBlock(o.level)) }
-            ArchiveFormat.TAR_XZ -> writeTar(files, target) { XZCompressorOutputStream(it, xzPreset(o.level)) }
+            ArchiveFormat.TAR_BZ2 -> writeTar(files, target, progress) {
+                BZip2CompressorOutputStream(it, bzBlock(o.level))
+            }
+            ArchiveFormat.TAR_XZ -> writeTar(files, target, progress) {
+                XZCompressorOutputStream(it, xzPreset(o.level))
+            }
         }
     }
 
-    private fun writeZip(files: List<File>, target: File, o: CompressOptions) {
+    private fun writeZip(files: List<File>, target: File, o: CompressOptions, progress: OpProgress?) {
         val params = ZipParameters()
         if (o.level == LevelOption.STORE) {
             params.compressionMethod = CompressionMethod.STORE
@@ -366,19 +710,22 @@ object Archives {
             }
         }
         val zip = if (encrypt) ZipFile(target, o.password.toCharArray()) else ZipFile(target)
+        zip.setBufferSize(BUF)
         zip.use { z ->
-            val split = o.splitBytes
-            if (split != null) {
-                z.createSplitZipFile(files, params, true, split)
-            } else {
-                for (f in files) {
-                    if (f.isDirectory) z.addFolder(f, params) else z.addFile(f, params)
+            withMonitor(z, progress) {
+                val split = o.splitBytes
+                if (split != null) {
+                    z.createSplitZipFile(files, params, true, split)
+                } else {
+                    for (f in files) {
+                        if (f.isDirectory) z.addFolder(f, params) else z.addFile(f, params)
+                    }
                 }
             }
         }
     }
 
-    private fun write7z(files: List<File>, target: File, level: LevelOption) {
+    private fun write7z(files: List<File>, target: File, level: LevelOption, progress: OpProgress?) {
         SevenZOutputFile(target).use { out ->
             if (level == LevelOption.STORE) {
                 out.setContentCompression(SevenZMethod.COPY)
@@ -387,8 +734,9 @@ object Archives {
                     listOf(SevenZMethodConfiguration(SevenZMethod.LZMA2, LZMA2Options(xzPreset(level))))
                 )
             }
-            val buf = ByteArray(64 * 1024)
+            val buf = ByteArray(BUF)
             fun add(file: File, path: String) {
+                progress?.check()
                 val isDir = file.isDirectory
                 val entry = SevenZArchiveEntry()
                 entry.setName(path)
@@ -401,11 +749,16 @@ object Archives {
                     out.closeArchiveEntry()
                     file.listFiles()?.forEach { add(it, "$path/${it.name}") }
                 } else {
+                    progress?.label = file.name
                     file.inputStream().use { ins ->
                         while (true) {
                             val n = ins.read(buf)
                             if (n < 0) break
                             out.write(buf, 0, n)
+                            if (progress != null) {
+                                progress.check()
+                                progress.done += n
+                            }
                         }
                     }
                     out.closeArchiveEntry()
@@ -416,12 +769,18 @@ object Archives {
         }
     }
 
-    private fun writeTar(files: List<File>, target: File, wrap: (OutputStream) -> OutputStream) {
-        val raw = BufferedOutputStream(FileOutputStream(target))
+    private fun writeTar(
+        files: List<File>,
+        target: File,
+        progress: OpProgress?,
+        wrap: (OutputStream) -> OutputStream
+    ) {
+        val raw = BufferedOutputStream(FileOutputStream(target), BUF)
         TarArchiveOutputStream(wrap(raw)).use { tos ->
             tos.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
             tos.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
             fun add(file: File, path: String) {
+                progress?.check()
                 if (file.isDirectory) {
                     val entry = TarArchiveEntry("$path/")
                     entry.setModTime(Date(file.lastModified()))
@@ -433,7 +792,8 @@ object Archives {
                     entry.setSize(file.length())
                     entry.setModTime(Date(file.lastModified()))
                     tos.putArchiveEntry(entry)
-                    file.inputStream().use { it.copyTo(tos) }
+                    progress?.label = file.name
+                    file.inputStream().use { copyStream(it, tos, progress, true) }
                     tos.closeArchiveEntry()
                 }
             }

@@ -17,6 +17,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -24,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,8 +34,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -350,4 +354,56 @@ internal fun CompressDialog(
             }
         )
     }
+}
+
+// ------------------------------------------------------------------ Progresso
+
+/** Mostra o andamento de uma operação longa (compactar/extrair) com botão de cancelar. */
+@Composable
+internal fun ProgressDialog(title: String, progress: OpProgress, onCancel: () -> Unit) {
+    val context = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(200)
+            tick++
+        }
+    }
+    // Ler "tick" aqui faz a tela se atualizar a cada 200 ms
+    val refresh = tick
+    val total = progress.total
+    val done = progress.done
+    val label = progress.label
+
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (label.isNotEmpty()) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (total > 0) {
+                    LinearProgressIndicator(
+                        progress = { (done.toFloat() / total).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    val percent = ((done * 100) / total).coerceIn(0L, 100L)
+                    Text(
+                        "$percent%  •  ${Formatter.formatFileSize(context, done)} de " +
+                            Formatter.formatFileSize(context, total)
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    if (done > 0) Text(Formatter.formatFileSize(context, done) + " processados")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onCancel) { Text("Cancelar") } }
+    )
 }
