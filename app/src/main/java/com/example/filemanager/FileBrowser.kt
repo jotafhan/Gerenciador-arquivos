@@ -152,6 +152,7 @@ fun FileBrowserScreen() {
                     tool = tool,
                     storage = storage,
                     onClose = { closeTool() },
+                    onOpenTool = { tool = it },
                     onShowInFolder = { dir ->
                         jumpTo = dir.absolutePath
                         home = false
@@ -754,6 +755,14 @@ private fun BrowserContent(
                                     }
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Analisar esta pasta") },
+                                    onClick = {
+                                        menuOpen = false
+                                        AnalysisTarget.path = current.absolutePath
+                                        onOpenTool(TOOL_SPACE)
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Configurações") },
                                     onClick = {
                                         menuOpen = false
@@ -771,7 +780,7 @@ private fun BrowserContent(
             if (selected.isNotEmpty()) {
                 // As ações da seleção ficam na barra do topo
             } else if (cb != null) {
-                BottomAppBar {
+                CompactBottomBar {
                     Text(
                         text = "${cb.paths.size} para ${if (cb.move) "mover" else "copiar"}",
                         modifier = Modifier.padding(start = 16.dp)
@@ -794,7 +803,7 @@ private fun BrowserContent(
                     ) { Text("Colar aqui") }
                 }
             } else {
-                BottomAppBar {
+                CompactBottomBar {
                     IconButton(onClick = { searching = true }, modifier = Modifier.weight(1f)) {
                         Text("🔍", fontSize = 20.sp)
                     }

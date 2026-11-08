@@ -230,19 +230,75 @@ object Archives {
 
     // ------------------------------------------------------------ Listar
 
+    /**
+     * Descobre o formato pelos primeiros bytes do arquivo (a extensão pode estar errada).
+     * Devolve "zip", "7z", "rar", "gz", "bz2", "xz" ou null.
+     */
+    fun sniff(file: File): String? = runCatching {
+        FileInputStream(file).use { input ->
+            val head = ByteArray(8)
+            val n = input.read(head)
+            if (n < 4) {
+                null
+            } else {
+                fun b(i: Int) = head[i].toInt() and 0xFF
+                when {
+                    b(0) == 0x50 && b(1) == 0x4B && (b(2) == 0x03 || b(2) == 0x05 || b(2) == 0x07) -> "zip"
+                    b(0) == 0x37 && b(1) == 0x7A && b(2) == 0xBC && b(3) == 0xAF -> "7z"
+                    b(0) == 0x52 && b(1) == 0x61 && b(2) == 0x72 && b(3) == 0x21 -> "rar"
+                    b(0) == 0x1F && b(1) == 0x8B -> "gz"
+                    b(0) == 0x42 && b(1) == 0x5A && b(2) == 0x68 -> "bz2"
+                    b(0) == 0xFD && b(1) == 0x37 && b(2) == 0x7A && b(3) == 0x58 -> "xz"
+                    else -> null
+                }
+            }
+        }
+    }.getOrNull()
+
+    private fun kindOf(archive: File, lower: String): String {
+        sniff(archive)?.let { return it }
+        return when {
+            isZipLike(lower) -> "zip"
+            lower.endsWith(".7z") -> "7z"
+            lower.endsWith(".rar") -> "rar"
+            lower.endsWith(".gz") || lower.endsWith(".tgz") -> "gz"
+            lower.endsWith(".bz2") || lower.endsWith(".tbz2") -> "bz2"
+            lower.endsWith(".xz") || lower.endsWith(".txz") -> "xz"
+            else -> "?"
+        }
+    }
+
+    private fun isTarName(lower: String): Boolean =
+        lower.contains(".tar.") || lower.endsWith(".tgz") || lower.endsWith(".tbz2") || lower.endsWith(".txz")
+
+    private fun wrapFor(kind: String, input: InputStream): InputStream = when (kind) {
+        "gz" -> GzipCompressorInputStream(input)
+        "bz2" -> BZip2CompressorInputStream(input)
+        else -> XZCompressorInputStream(input)
+    }
+
     fun list(archive: File): Result<List<ArchiveEntryInfo>> = runCatching {
+        try {
+            listInner(archive)
+        } catch (e: Exception) {
+            throw friendly(e)
+        }
+    }
+
+    private fun listInner(archive: File): List<ArchiveEntryInfo> {
         val lower = archive.name.lowercase()
-        when {
-            isZipLike(lower) -> listZip(archive)
-            lower.endsWith(".7z") -> list7z(archive)
-            lower.endsWith(".rar") -> listRar(archive)
-            lower.endsWith(".tar.gz") || lower.endsWith(".tgz") -> listTar(archive) { GzipCompressorInputStream(it) }
-            lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") -> listTar(archive) { BZip2CompressorInputStream(it) }
-            lower.endsWith(".tar.xz") || lower.endsWith(".txz") -> listTar(archive) { XZCompressorInputStream(it) }
-            lower.endsWith(".tar") -> listTar(archive) { it }
-            lower.endsWith(".gz") || lower.endsWith(".bz2") || lower.endsWith(".xz") ->
-                listOf(ArchiveEntryInfo(archive.nameWithoutExtension, false, -1L, archive.lastModified()))
-            else -> error("Formato não suportado")
+        return when (val kind = kindOf(archive, lower)) {
+            "zip" -> listZip(archive)
+            "7z" -> list7z(archive)
+            "rar" -> listRar(archive)
+            "gz", "bz2", "xz" ->
+                if (isTarName(lower)) {
+                    listTar(archive) { wrapFor(kind, it) }
+                } else {
+                    listOf(ArchiveEntryInfo(archive.nameWithoutExtension, false, -1L, archive.lastModified()))
+                }
+            else ->
+                if (lower.endsWith(".tar")) listTar(archive) { it } else error("Formato não reconhecido")
         }
     }
 
@@ -352,30 +408,38 @@ object Archives {
         filter: ((String) -> Boolean)?
     ) {
         val lower = archive.name.lowercase()
-        when {
-            isZipLike(lower) -> extractZipAny(archive, target, password, progress, filter)
-            lower.endsWith(".7z") -> extract7z(archive, target, progress, filter)
-            lower.endsWith(".rar") -> extractRar(archive, target, progress, filter)
-            lower.endsWith(".tar.gz") || lower.endsWith(".tgz") ->
-                extractTar(archive, target, progress, filter) { GzipCompressorInputStream(it) }
-            lower.endsWith(".tar.bz2") || lower.endsWith(".tbz2") ->
-                extractTar(archive, target, progress, filter) { BZip2CompressorInputStream(it) }
-            lower.endsWith(".tar.xz") || lower.endsWith(".txz") ->
-                extractTar(archive, target, progress, filter) { XZCompressorInputStream(it) }
-            lower.endsWith(".tar") -> extractTar(archive, target, progress, filter) { it }
-            lower.endsWith(".gz") -> extractSingle(archive, target, ".gz", progress) { GzipCompressorInputStream(it) }
-            lower.endsWith(".bz2") -> extractSingle(archive, target, ".bz2", progress) { BZip2CompressorInputStream(it) }
-            lower.endsWith(".xz") -> extractSingle(archive, target, ".xz", progress) { XZCompressorInputStream(it) }
-            else -> error("Formato não suportado")
+        when (val kind = kindOf(archive, lower)) {
+            "zip" -> extractZipAny(archive, target, password, progress, filter)
+            "7z" -> extract7z(archive, target, progress, filter)
+            "rar" -> extractRar(archive, target, progress, filter)
+            "gz", "bz2", "xz" ->
+                if (isTarName(lower)) {
+                    extractTar(archive, target, progress, filter) { wrapFor(kind, it) }
+                } else {
+                    extractSingle(archive, target, progress) { wrapFor(kind, it) }
+                }
+            else ->
+                if (lower.endsWith(".tar")) {
+                    extractTar(archive, target, progress, filter) { it }
+                } else {
+                    error("Formato não reconhecido")
+                }
         }
     }
 
+    private const val BROKEN_ZIP =
+        "Não encontrei o índice do ZIP no fim do arquivo. Ele provavelmente está incompleto " +
+            "(compactação ou cópia interrompida), está corrompido ou não é realmente um ZIP."
+
     private fun friendly(e: Exception): Exception {
         val kind = e.javaClass.simpleName
+        val text = e.message.orEmpty()
         return when {
+            e is PasswordRequiredException || e is OperationCancelledException -> e
+            text.contains("headers not found", ignoreCase = true) -> IllegalStateException(BROKEN_ZIP)
             kind.contains("V5") ->
                 IllegalStateException("RAR5 ainda não é suportado (só RAR4). Extraia no computador.")
-            kind.contains("Encrypted") || e.message?.contains("password", ignoreCase = true) == true ->
+            kind.contains("Encrypted") || text.contains("password", ignoreCase = true) ->
                 IllegalStateException("Arquivo protegido por senha (só ZIP com senha é suportado)")
             else -> e
         }
@@ -403,8 +467,15 @@ object Archives {
     ) {
         val encrypted = isZipEncrypted(archive)
         if (!encrypted && password == null && !hasSplitParts(archive)) {
-            extractPlainZip(archive, target, progress, filter)
-            return
+            try {
+                extractPlainZip(archive, target, progress, filter)
+                return
+            } catch (e: OperationCancelledException) {
+                throw e
+            } catch (e: Exception) {
+                // ZIP64 ou algo que o leitor do Android não entende: tenta de novo com o zip4j
+                progress?.done = 0L
+            }
         }
         if (encrypted && password.isNullOrEmpty()) throw PasswordRequiredException(false)
         try {
@@ -599,12 +670,11 @@ object Archives {
     private fun extractSingle(
         archive: File,
         target: File,
-        ext: String,
         progress: OpProgress?,
         wrap: (InputStream) -> InputStream
     ) {
         progress?.total = archive.length()
-        val name = archive.name.dropLast(ext.length).ifEmpty { "arquivo" }
+        val name = archive.nameWithoutExtension.ifEmpty { "arquivo" }
         progress?.label = name
         val counting = CountingInputStream(FileInputStream(archive)) { progress?.done = it }
         wrap(BufferedInputStream(counting, BUF)).use { input ->
