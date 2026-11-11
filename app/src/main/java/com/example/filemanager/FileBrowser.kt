@@ -219,6 +219,11 @@ private fun BrowserContent(
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     var selectMenuOpen by remember { mutableStateOf(false) }
+
+    // Guias: guarda as inativas (a guia ativa é o estado "ao vivo" desta tela)
+    var tabsRaw by rememberSaveable { mutableStateOf("") }
+    var activeTab by rememberSaveable { mutableStateOf(0) }
+    val tabs = remember(tabsRaw) { decodeTabs(tabsRaw) }
     var selectedBytes by remember { mutableStateOf<Long?>(null) }
 
     // Tamanho total dos itens selecionados (pastas incluem o conteúdo)
@@ -439,6 +444,51 @@ private fun BrowserContent(
         }
     }
 
+    fun liveTab() = TabData(currentPath, sortName, ascending, showHidden)
+
+    fun applyTabs(list: List<TabData>, newActive: Int) {
+        tabsRaw = encodeTabs(list)
+        activeTab = newActive
+        val t = list[newActive]
+        currentPath = t.path
+        sortName = t.sort
+        ascending = t.ascending
+        showHidden = t.hidden
+        selected = emptySet()
+        searching = false
+        query = ""
+    }
+
+    fun tabListWithLive(): MutableList<TabData> {
+        val list = tabs.toMutableList()
+        if (list.isEmpty()) list.add(liveTab())
+        list[activeTab.coerceIn(0, list.lastIndex)] = liveTab()
+        return list
+    }
+
+    fun switchTab(index: Int) {
+        val list = tabListWithLive()
+        applyTabs(list, index.coerceIn(0, list.lastIndex))
+    }
+
+    fun newTab(path: String) {
+        val list = tabListWithLive()
+        list.add(TabData(path, sortName, ascending, showHidden))
+        applyTabs(list, list.lastIndex)
+    }
+
+    fun closeTab(index: Int) {
+        val list = tabListWithLive()
+        if (list.size <= 1 || index !in list.indices) return
+        list.removeAt(index)
+        val newActive = when {
+            index < activeTab -> activeTab - 1
+            index == activeTab -> minOf(index, list.lastIndex)
+            else -> activeTab
+        }
+        applyTabs(list, newActive.coerceIn(0, list.lastIndex))
+    }
+
     BackHandler(enabled = active && selected.isNotEmpty()) { selected = emptySet() }
     BackHandler(enabled = active && selected.isEmpty() && searching) {
         searching = false
@@ -447,7 +497,10 @@ private fun BrowserContent(
     BackHandler(enabled = active && selected.isEmpty() && !searching && canGoUp) {
         current.parentFile?.let { navigateTo(it) }
     }
-    BackHandler(enabled = active && selected.isEmpty() && !searching && !canGoUp) { onGoHome() }
+    BackHandler(enabled = active && selected.isEmpty() && !searching && !canGoUp) {
+        // Com várias guias, voltar na raiz fecha a guia; com uma só, vai para o Início
+        if (tabs.size > 1) closeTab(activeTab) else onGoHome()
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -571,6 +624,15 @@ private fun BrowserContent(
                                             if (one.isDirectory) navigateTo(one) else FileOpener.open(context, one)
                                         }
                                     )
+                                    if (one.isDirectory) {
+                                        DropdownMenuItem(
+                                            text = { Text("Abrir em nova guia") },
+                                            onClick = {
+                                                moreOpen = false
+                                                newTab(one.absolutePath)
+                                            }
+                                        )
+                                    }
                                     if (one.isFile) {
                                         DropdownMenuItem(
                                             text = { Text("Abrir com...") },
@@ -755,6 +817,13 @@ private fun BrowserContent(
                                     }
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Nova guia") },
+                                    onClick = {
+                                        menuOpen = false
+                                        newTab(currentPath)
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Analisar esta pasta") },
                                     onClick = {
                                         menuOpen = false
@@ -868,6 +937,21 @@ private fun BrowserContent(
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             if (busy || sizing || loadingList) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+
+            if (tabs.size > 1) {
+                val livePath = currentPath
+                val titles = tabs.mapIndexed { i, t ->
+                    val path = if (i == activeTab) livePath else t.path
+                    if (path == root.absolutePath) "Armazenamento" else File(path).name.ifEmpty { "/" }
+                }
+                TabStrip(
+                    titles = titles,
+                    active = activeTab.coerceIn(0, titles.lastIndex),
+                    onSelect = { switchTab(it) },
+                    onClose = { closeTab(it) },
+                    onNew = { newTab(currentPath) }
+                )
+            }
 
             if (searching) {
                 OutlinedTextField(

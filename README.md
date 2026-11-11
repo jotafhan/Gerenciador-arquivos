@@ -1,4 +1,4 @@
-# Gerenciador de Arquivos (v0.11.0)
+# Gerenciador de Arquivos (v0.12.0)
 
 Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compose + Material 3).
 
@@ -37,6 +37,8 @@ Esqueleto de um gerenciador de arquivos Android moderno (Kotlin + Jetpack Compos
 **Análise do armazenamento:** varredura animada e resultados em cartões (tipos, grandes, recentes, pastas vazias, temporários/residuais, APKs já instalados, duplicados) com "Revisar e apagar". Também disponível para uma pasta (⋮ > Analisar esta pasta).
 
 **Compactados:** o formato é detectado pelo conteúdo do arquivo (não só pela extensão); ZIP64 e arquivos incompletos têm mensagens claras.
+
+**Abas (guias):** várias pastas abertas ao mesmo tempo (⋮ > Nova guia, ou "Abrir em nova guia" numa pasta selecionada). Cada guia guarda sua pasta, ordenação e arquivos ocultos; copiar numa guia e colar em outra funciona.
 
 ## Compilar na nuvem (GitHub Actions)
 1. Crie um repositório no GitHub e envie todos os arquivos desta pasta (inclusive `.github`).
