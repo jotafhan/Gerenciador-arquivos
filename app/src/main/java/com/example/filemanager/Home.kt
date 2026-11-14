@@ -77,7 +77,7 @@ private class HomeItem(val icon: String, val label: String, val color: Color, va
 
 private fun humanSize(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
-internal fun colorFor(cat: Category): Color = when (cat) {
+private fun colorFor(cat: Category): Color = when (cat) {
     Category.IMAGES -> Color(0xFF00838F)
     Category.VIDEOS -> Color(0xFFC62828)
     Category.AUDIO -> Color(0xFFF57C00)
@@ -95,8 +95,6 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
     var refresh by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf(HomeCache.report) }
-    val prefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
-    var recentExpanded by remember { mutableStateOf(prefs.getBoolean("recent_expanded", true)) }
 
     // Varredura em segundo plano: tamanhos por tipo (menu lateral) e arquivos recentes
     LaunchedEffect(refresh) {
@@ -115,6 +113,33 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
             stat.totalBytes to stat.availableBytes
         }.getOrDefault(0L to 0L)
     }
+    val (ramTotal, ramFree) = remember(refresh) {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val info = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        info.totalMem to info.availMem
+    }
+
+    val folders = remember {
+        buildList<Pair<String, File>> {
+            listOf(
+                "Downloads" to "Download",
+                "Câmera" to "DCIM/Camera",
+                "Documentos" to "Documents",
+                "Imagens" to "Pictures",
+                "Filmes" to "Movies",
+                "Música" to "Music"
+            ).forEach { (label, rel) ->
+                val dir = File(storage, rel)
+                if (dir.isDirectory) add(label to dir)
+            }
+            listOf("Pictures/Screenshots", "DCIM/Screenshots")
+                .map { File(storage, it) }
+                .firstOrNull { it.isDirectory }
+                ?.let { add("Capturas de tela" to it) }
+        }
+    }
+
     fun go(action: () -> Unit) {
         scope.launch { drawerState.close() }
         action()
@@ -127,14 +152,12 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
         HomeItem("👯", "Duplicados", Color(0xFF43A047)) { onOpenTool(TOOL_DUPLICATES) },
         HomeItem("🗑️", "Lixeira", Color(0xFF757575)) { onOpenTool(TOOL_TRASH) }
     )
-    val mediaItems = Category.entries.filter { it != Category.APKS }.map { cat ->
+    val folderItems = folders.map { (label, dir) ->
+        HomeItem("📁", label, Color(0xFF4FA3C7)) { onOpenFolder(dir) }
+    }
+    val mediaItems = Category.entries.map { cat ->
         HomeItem(cat.icon, cat.label, colorFor(cat)) { onOpenTool(cat.name) }
     }
-    val mediaAll = mediaItems + HomeItem("⭐", "Favoritos", Color(0xFF1E88E5)) { onOpenTool(TOOL_FAVORITES) }
-    val appItems = listOf(
-        HomeItem("📲", "Aplicativos", Color(0xFF5C6BC0)) { onOpenTool(TOOL_APPS) },
-        HomeItem(Category.APKS.icon, Category.APKS.label, colorFor(Category.APKS)) { onOpenTool(Category.APKS.name) }
-    )
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -152,25 +175,19 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         go { onOpenFolder(storage) }
                     }
                     DrawerSection("BIBLIOTECA")
-                    DrawerEntry("⭐", "Favoritos", null, false) { go { onOpenTool(TOOL_FAVORITES) } }
-                    Category.entries.filter { it != Category.APKS }.forEach { cat ->
+                    Category.entries.forEach { cat ->
                         val bytes = report?.byCategory?.firstOrNull { it.first == cat.label }?.second
                         DrawerEntry(cat.icon, cat.label, bytes?.let { humanSize(context, it) }, false) {
                             go { onOpenTool(cat.name) }
                         }
                     }
                     DrawerEntry("🗑️", "Lixeira", null, false) { go { onOpenTool(TOOL_TRASH) } }
-                    DrawerSection("APPS")
-                    DrawerEntry("📲", "Aplicativos instalados", null, false) { go { onOpenTool(TOOL_APPS) } }
-                    DrawerEntry(
-                        "🤖",
-                        "APKs",
-                        report?.byCategory?.firstOrNull { it.first == Category.APKS.label }?.second
-                            ?.let { humanSize(context, it) },
-                        false
-                    ) { go { onOpenTool(Category.APKS.name) } }
+                    DrawerSection("PASTAS")
+                    folders.forEach { (label, dir) ->
+                        DrawerEntry("📁", label, null, false) { go { onOpenFolder(dir) } }
+                    }
                     DrawerSection("FERRAMENTAS")
-                    DrawerEntry("📊", "Analisar armazenamento", null, false) { go { onOpenTool(TOOL_SPACE) } }
+                    DrawerEntry("📊", "Analisar espaço", null, false) { go { onOpenTool(TOOL_SPACE) } }
                     DrawerEntry("👯", "Achar duplicados", null, false) { go { onOpenTool(TOOL_DUPLICATES) } }
                     Spacer(Modifier.height(24.dp))
                 }
@@ -195,13 +212,6 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                                         refresh++
                                     }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text("Configurações") },
-                                    onClick = {
-                                        menuOpen = false
-                                        onOpenTool(TOOL_SETTINGS)
-                                    }
-                                )
                             }
                         }
                     }
@@ -219,36 +229,35 @@ fun HomeScreen(storage: File, onOpenFolder: (File) -> Unit, onOpenTool: (String)
                         title = "Armazenamento interno",
                         subtitle = "${humanSize(context, free)} livre",
                         fraction = if (total > 0) used.toFloat() / total else 0f,
-                        trailing = null,
+                        trailing = "📊",
                         onClick = { onOpenFolder(storage) },
-                        onTrailingClick = null
+                        onTrailingClick = { onOpenTool(TOOL_SPACE) }
                     )
                 }
                 item {
-                    ActionCard(
-                        icon = "📊",
-                        title = "Analisar armazenamento",
-                        subtitle = "Tipos, maiores pastas e maiores arquivos",
-                        onClick = { onOpenTool(TOOL_SPACE) }
+                    val used = (ramTotal - ramFree).coerceAtLeast(0L)
+                    InfoCard(
+                        icon = "🧠",
+                        title = "Memória",
+                        subtitle = "${humanSize(context, ramFree)} livre",
+                        fraction = if (ramTotal > 0) used.toFloat() / ramTotal else 0f,
+                        trailing = null,
+                        onClick = null,
+                        onTrailingClick = null
                     )
                 }
                 item { SectionHeader("FERRAMENTAS") }
                 item { ButtonGrid(tools) }
-                item { SectionHeader("MÍDIA") }
-                item { ButtonGrid(mediaAll) }
-                item { SectionHeader("APPS") }
-                item { ButtonGrid(appItems) }
-                item {
-                    CollapsibleHeader("RECENTE", recentExpanded) {
-                        recentExpanded = !recentExpanded
-                        prefs.edit().putBoolean("recent_expanded", recentExpanded).apply()
-                    }
+                if (folderItems.isNotEmpty()) {
+                    item { SectionHeader("PASTAS") }
+                    item { ButtonGrid(folderItems) }
                 }
+                item { SectionHeader("MÍDIA") }
+                item { ButtonGrid(mediaItems) }
+                item { SectionHeader("RECENTE") }
 
                 val recent = report?.recentFiles
-                if (!recentExpanded) {
-                    // minimizado: não mostra a lista
-                } else if (recent == null) {
+                if (recent == null) {
                     item { Text("Carregando...", modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
                 } else if (recent.isEmpty()) {
                     item { Text("Nada por aqui ainda", modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) }
@@ -391,58 +400,5 @@ private fun DrawerEntry(icon: String, label: String, badge: String?, selected: B
             icon = { Text(icon) },
             modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
         )
-    }
-}
-
-@Composable
-private fun CollapsibleHeader(text: String, expanded: Boolean, onToggle: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = if (expanded) "▲" else "▼",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun ActionCard(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(28.dp)
-    Surface(
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .fillMaxWidth()
-            .clip(shape)
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(icon, style = MaterialTheme.typography.headlineSmall)
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
     }
 }

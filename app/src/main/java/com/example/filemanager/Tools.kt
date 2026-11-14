@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
@@ -55,33 +54,16 @@ import java.util.Date
 const val TOOL_TRASH = "TRASH"
 const val TOOL_SPACE = "SPACE"
 const val TOOL_DUPLICATES = "DUPLICATES"
-const val TOOL_APPS = "APPS"
-const val TOOL_FAVORITES = "FAVORITES"
-const val TOOL_SETTINGS = "SETTINGS"
 
 private fun fmt(context: Context, bytes: Long): String = Formatter.formatFileSize(context, bytes)
 
 /** Escolhe qual ferramenta (tela cheia) mostrar por cima do navegador. */
 @Composable
-fun ToolHost(
-    tool: String,
-    storage: File,
-    onClose: () -> Unit,
-    onShowInFolder: (File) -> Unit,
-    onOpenTool: (String) -> Unit
-) {
+fun ToolHost(tool: String, storage: File, onClose: () -> Unit, onShowInFolder: (File) -> Unit) {
     when (tool) {
         TOOL_TRASH -> TrashScreen(storage = storage, onClose = onClose)
-        TOOL_SPACE -> SpaceScreen(
-            storage = storage,
-            onClose = onClose,
-            onShowInFolder = onShowInFolder,
-            onOpenDuplicates = { onOpenTool(TOOL_DUPLICATES) }
-        )
+        TOOL_SPACE -> SpaceScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
         TOOL_DUPLICATES -> DuplicatesScreen(storage = storage, onClose = onClose)
-        TOOL_APPS -> AppsScreen(storage = storage, onClose = onClose)
-        TOOL_FAVORITES -> FavoritesScreen(storage = storage, onClose = onClose, onShowInFolder = onShowInFolder)
-        TOOL_SETTINGS -> SettingsScreen(onClose = onClose)
         else -> {
             val cat = Category.entries.firstOrNull { it.name == tool }
             if (cat != null) {
@@ -91,7 +73,7 @@ fun ToolHost(
     }
 }
 
-internal class Act(val label: String, val run: () -> Unit)
+private class Act(val label: String, val run: () -> Unit)
 
 private fun fileActions(
     context: Context,
@@ -106,7 +88,7 @@ private fun fileActions(
 )
 
 @Composable
-internal fun ActionsDialog(title: String, info: String, actions: List<Act>, onDismiss: () -> Unit) {
+private fun ActionsDialog(title: String, info: String, actions: List<Act>, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
@@ -201,9 +183,6 @@ internal fun CategoryScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<File?>(null) }
 
-    var apkToInstall by remember { mutableStateOf<File?>(null) }
-    val listState = rememberLazyListState()
-    LaunchedEffect(sortName, ascending) { listState.scrollToItem(0) }
     LaunchedEffect(cat) {
         loading = true
         found = withContext(Dispatchers.IO) { Scanner.findCategory(storage, cat) }
@@ -218,15 +197,6 @@ internal fun CategoryScreen(
 
     val sortKey = SortKey.valueOf(sortName)
     val totalBytes = remember(sorted) { sorted.sumOf { it.size } }
-
-    apkToInstall?.let { f ->
-        InstallApkDialog(
-            file = f,
-            onDismiss = { apkToInstall = null },
-            onViewContent = null,
-            onResult = { msg -> scope.launch { snackbar.showSnackbar(msg) } }
-        )
-    }
 
     fun trash(file: File) {
         scope.launch {
@@ -287,25 +257,132 @@ internal fun CategoryScreen(
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(sorted, key = { it.file.absolutePath }) { item ->
                         FileRow(
                             file = item.file,
-                            entry = FileEntry(item.file, false, item.size, item.modified),
                             extra = item.file.parent?.removePrefix(storage.absolutePath),
                             selectionMode = false,
                             isSelected = false,
-                            onClick = {
-                                if (ApkInstaller.isInstallable(item.file)) {
-                                    apkToInstall = item.file
-                                } else {
-                                    FileOpener.open(context, item.file)
-                                }
-                            },
+                            onClick = { FileOpener.open(context, item.file) },
                             onLongClick = { picked = item.file }
                         )
                         HorizontalDivider()
                     }
+                }
+            }
+        }
+    }
+
+    picked?.let { f ->
+        ActionsDialog(
+            title = f.name,
+            info = f.absolutePath,
+            actions = fileActions(context, f, onShowInFolder) { trash(it) },
+            onDismiss = { picked = null }
+        )
+    }
+}
+
+// ---------------------------------------------------------------- Espaço
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SpaceScreen(storage: File, onClose: () -> Unit, onShowInFolder: (File) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    var report by remember { mutableStateOf<SpaceReport?>(null) }
+    var picked by remember { mutableStateOf<File?>(null) }
+
+    LaunchedEffect(Unit) {
+        report = withContext(Dispatchers.IO) { Scanner.analyzeSpace(storage) }
+    }
+    BackHandler { onClose() }
+
+    fun trash(file: File) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { Trash.moveToTrash(storage, file) }
+            if (result.isSuccess) {
+                report = report?.let { r -> r.copy(bigFiles = r.bigFiles.filter { it != file }) }
+            }
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(
+                if (result.isSuccess) "Movido para a lixeira"
+                else "Erro: ${result.exceptionOrNull()?.message ?: "falha ao mover"}"
+            )
+        }
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Espaço") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("←") } }
+            )
+        }
+    ) { padding ->
+        val r = report
+        if (r == null) {
+            Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(
+                    "Analisando o armazenamento... pode levar alguns segundos.",
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        } else {
+            val used = (r.totalBytes - r.freeBytes).coerceAtLeast(0L)
+            LazyColumn(modifier = Modifier.padding(padding).fillMaxSize()) {
+                item {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Armazenamento interno", style = MaterialTheme.typography.titleMedium)
+                        LinearProgressIndicator(
+                            progress = { if (r.totalBytes > 0) used.toFloat() / r.totalBytes else 0f },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                        )
+                        Text("Usado ${fmt(context, used)} de ${fmt(context, r.totalBytes)}  •  livre ${fmt(context, r.freeBytes)}")
+                        Text(
+                            "Os valores abaixo contam só os arquivos que o app consegue ler (${fmt(context, r.scannedBytes)}). " +
+                                "O resto é sistema, apps e dados protegidos, como Android/data.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+                item { SectionTitle("Por tipo de arquivo") }
+                items(r.byCategory, key = { it.first }) { (label, bytes) ->
+                    SizeRow(
+                        icon = Category.entries.firstOrNull { it.label == label }?.icon ?: "📁",
+                        title = label,
+                        subtitle = null,
+                        value = fmt(context, bytes),
+                        fraction = if (r.scannedBytes > 0) bytes.toFloat() / r.scannedBytes else 0f,
+                        onClick = null
+                    )
+                }
+                item { SectionTitle("Maiores pastas (toque para abrir)") }
+                items(r.folders, key = { it.first.absolutePath }) { (dir, bytes) ->
+                    SizeRow(
+                        icon = "📁",
+                        title = dir.name,
+                        subtitle = null,
+                        value = fmt(context, bytes),
+                        fraction = if (r.scannedBytes > 0) bytes.toFloat() / r.scannedBytes else 0f,
+                        onClick = { onShowInFolder(dir) }
+                    )
+                }
+                item { SectionTitle("Maiores arquivos (toque para ações)") }
+                items(r.bigFiles, key = { it.absolutePath }) { f ->
+                    SizeRow(
+                        icon = iconFor(f),
+                        title = f.name,
+                        subtitle = f.parent?.removePrefix(storage.absolutePath),
+                        value = fmt(context, f.length()),
+                        fraction = null,
+                        onClick = { picked = f }
+                    )
                 }
             }
         }

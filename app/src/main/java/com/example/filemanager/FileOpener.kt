@@ -1,7 +1,6 @@
 package com.example.filemanager
 
 import android.content.ActivityNotFoundException
-import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -28,23 +27,6 @@ object FileOpener {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            Toast.makeText(context, "Nenhum app para abrir este tipo de arquivo", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "Não foi possível abrir: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** Abre sempre mostrando a lista de apps (ignora o app padrão). */
-    fun openWith(context: Context, file: File) {
-        try {
-            val uri = uriFor(context, file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mimeOf(file))
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                clipData = ClipData.newRawUri("", uri)
-            }
-            context.startActivity(Intent.createChooser(intent, "Abrir com"))
         } catch (e: ActivityNotFoundException) {
             Toast.makeText(context, "Nenhum app para abrir este tipo de arquivo", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {

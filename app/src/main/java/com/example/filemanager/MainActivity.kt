@@ -31,24 +31,9 @@ class MainActivity : ComponentActivity() {
             hasAccess.value = checkAccess()
         }
 
-    private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
-
-    private fun askNotificationPermissionOnce() {
-        if (Build.VERSION.SDK_INT < 33) return
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
-        val prefs = getSharedPreferences("ui", MODE_PRIVATE)
-        if (prefs.getBoolean("asked_notifications", false)) return
-        prefs.edit().putBoolean("asked_notifications", true).apply()
-        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hasAccess.value = checkAccess()
-        Favorites.init(applicationContext)
-        AppSettings.init(applicationContext)
-        handleLaunchIntent(intent)
 
         setContent {
             val dark = isSystemInDarkTheme()
@@ -71,22 +56,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        handleLaunchIntent(intent)
-    }
-
-    /** Atalhos criados pelo app trazem a pasta a abrir em "open_path". */
-    private fun handleLaunchIntent(intent: Intent?) {
-        intent?.getStringExtra("open_path")?.let { LaunchRequest.path = it }
-    }
-
     override fun onResume() {
         super.onResume()
         // Ao voltar das configurações, confere se o acesso foi concedido
         hasAccess.value = checkAccess()
-        if (hasAccess.value) askNotificationPermissionOnce()
     }
 
     private fun checkAccess(): Boolean =
