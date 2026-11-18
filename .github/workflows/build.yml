@@ -29,9 +29,10 @@ jobs:
           set -o pipefail
           gradle assembleDebug --no-daemon 2>&1 | tee build.log
 
-      - name: Mostrar os erros do Kotlin
+            - name: Mostrar os erros do Kotlin
         if: failure()
-        run: grep -E '^e: ' build.log | head -30 | sed 's/^/::error::/' || true
+        run: |
+          grep -E '^e: ' build.log | head -30 | sed 's/^/::error::/' || true
 
       - name: Guardar o APK
         uses: actions/upload-artifact@v4
